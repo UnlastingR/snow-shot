@@ -1,0 +1,20 @@
+[package]
+name = "snowshot-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+build = "build.rs"
+
+[dependencies]
+slint = "1.17.1"
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
