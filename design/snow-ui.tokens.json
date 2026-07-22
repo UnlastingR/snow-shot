@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json.schemastore.org/design-tokens.json",
+  "name": "Snow UI",
+  "version": "0.1.0",
+  "description": "Native-lite design tokens for Snow Shot. Neo-utilitarian desktop UI with warm neutrals, compact density, subtle separators, and minimal visual noise.",
+  "color": {
+    "light": {
+      "window": "#F7F7F5",
+      "sidebar": "#F2F2F0",
+      "surface": "#FAFAF9",
+      "surfaceElevated": "#FFFFFF",
+      "surfaceHover": "#EEEEEB",
+      "surfaceSelected": "#E7E7E3",
+      "surfacePressed": "#DEDEDA",
+      "border": "#E2E2DE",
+      "borderStrong": "#D3D4CF",
+      "textPrimary": "#2F3136",
+      "textSecondary": "#6F747C",
+      "textMuted": "#969AA1",
+      "textOnAccent": "#FFFFFF",
+      "accent": "#168C82",
+      "accentHover": "#12786F",
+      "accentPressed": "#0E665F",
+      "focusRing": "#73C8C0",
+      "success": "#2F855A",
+      "warning": "#B7791F",
+      "danger": "#C94C4C"
+    }
+  },
+  "spacing": {
+    "xxs": 4,
+    "xs": 8,
+    "sm": 12,
+    "md": 16,
+    "lg": 24,
+    "xl": 32
+  },
+  "radius": {
+    "xs": 4,
+    "sm": 7,
+    "md": 10,
+    "lg": 14
+  },
+  "typography": {
+    "family": "system-ui",
+    "caption": 12,
+    "body": 13,
+    "label": 14,
+    "subtitle": 15,
+    "title": 18,
+    "weightRegular": 400,
+    "weightMedium": 500,
+    "weightSemibold": 600
+  },
+  "size": {
+    "icon": 16,
+    "iconLarge": 20,
+    "navRow": 34,
+    "control": 32,
+    "toolbar": 42,
+    "topbar": 44,
+    "sidebar": 248,
+    "inspector": 360,
+    "contentMin": 420,
+    "separator": 1
+  },
+  "motion": {
+    "fastMs": 80,
+    "normalMs": 140,
+    "panelMs": 180
+  },
+  "principles": [
+    "Treat the window as one continuous workspace instead of a stack of cards.",
+    "Use one-pixel separators and small surface shifts before shadows.",
+    "Keep controls compact, with a four-pixel spacing grid.",
+    "Reveal secondary actions on hover or selection.",
+    "Use accent color only for focus, selection, progress, and the primary action.",
+    "Avoid gradients, oversized rounded cards, decorative glass effects, and permanent action clutter."
+  ]
+}
