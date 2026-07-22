@@ -4,8 +4,7 @@ import {
     SnowSectionLabel,
     SnowNavItem,
     SnowIconButton,
-    SnowButton,
-    SnowSettingsRow,
+    SnowSettingsActionRow,
 } from "snow-ui.slint";
 
 export component AppWindow inherits Window {
@@ -122,28 +121,18 @@ export component AppWindow inherits Window {
 
                             Rectangle { height: 1px; background: SnowTheme.border; }
 
-                            SnowSettingsRow {
+                            SnowSettingsActionRow {
                                 title: "开机启动";
                                 description: "登录系统后在托盘中启动 Snow Shot，不创建主窗口。";
-
-                                SnowButton {
-                                    x: parent.width - self.width;
-                                    y: 11px;
-                                    label: "启用";
-                                }
+                                action-label: "启用";
                             }
 
                             Rectangle { height: 1px; background: SnowTheme.border; }
 
-                            SnowSettingsRow {
+                            SnowSettingsActionRow {
                                 title: "关闭窗口时";
                                 description: "销毁设置窗口并保留托盘服务，避免隐藏窗口长期占用内存。";
-
-                                SnowButton {
-                                    x: parent.width - self.width;
-                                    y: 11px;
-                                    label: "退出到托盘";
-                                }
+                                action-label: "退出到托盘";
                             }
                         }
 
@@ -159,29 +148,19 @@ export component AppWindow inherits Window {
 
                             Rectangle { height: 1px; background: SnowTheme.border; }
 
-                            SnowSettingsRow {
+                            SnowSettingsActionRow {
                                 title: "轻量本地 OCR";
                                 description: "默认不随程序加载；首次使用时下载，空闲后自动释放模型会话。";
-
-                                SnowButton {
-                                    x: parent.width - self.width;
-                                    y: 11px;
-                                    label: "配置";
-                                    primary: true;
-                                }
+                                action-label: "配置";
+                                primary: true;
                             }
 
                             Rectangle { height: 1px; background: SnowTheme.border; }
 
-                            SnowSettingsRow {
+                            SnowSettingsActionRow {
                                 title: "PaddleOCR-VL";
                                 description: "通过用户自建的本地或远程服务提供复杂文档识别，不打包到主程序。";
-
-                                SnowButton {
-                                    x: parent.width - self.width;
-                                    y: 11px;
-                                    label: "未安装";
-                                }
+                                action-label: "未安装";
                             }
                         }
 
