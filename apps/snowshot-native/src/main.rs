@@ -20,9 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = AppWindow::new()?;
     let tray = AppTray::new()?;
-    let capture = CaptureWindow::new()?;
-    capture.hide()?;
-    let _runtime = windows_runtime::WindowsRuntime::start(&app, &tray, &capture);
+    let _runtime = windows_runtime::WindowsRuntime::start(&app, &tray);
 
     app.show()?;
     tray.show()?;
