@@ -2,7 +2,7 @@ import { SnowTheme } from "theme/snow-theme.slint";
 import { SettingsShell } from "pages/settings-shell.slint";
 
 export component AppWindow inherits Window {
-    in-out property <string> runtime-status: "F1：截取鼠标所在显示器并复制到剪贴板";
+    in-out property <string> runtime-status: "Alt+F12：冻结鼠标所在显示器，拖动框选后复制";
     callback capture-clicked();
     callback autostart-clicked();
     callback close-behavior-clicked();

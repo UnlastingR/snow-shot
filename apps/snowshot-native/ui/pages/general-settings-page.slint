@@ -57,9 +57,9 @@ export component GeneralSettingsPage inherits Rectangle {
                     Rectangle { height: 1px; background: SnowTheme.border; }
 
                     SnowSettingsActionRow {
-                        title: "鼠标所在显示器";
-                        description: "使用 F1，或从托盘菜单触发。截图完成后直接写入 Windows 剪贴板。";
-                        action-label: "截图并复制";
+                        title: "区域截图";
+                        description: "使用 Alt+F12 冻结鼠标所在显示器，拖动框选；Enter 复制，Esc 取消。";
+                        action-label: "开始截图";
                         primary: true;
                         action-clicked => { root.capture-clicked(); }
                     }

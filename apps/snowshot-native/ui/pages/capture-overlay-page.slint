@@ -1,0 +1,179 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+import { CaptureToolbar } from "../components/capture-toolbar.slint";
+
+export component CaptureOverlayPage inherits Rectangle {
+    in property <image> frozen-frame;
+    callback selection-confirmed(float, float, float, float);
+    callback cancelled();
+
+    private property <length> anchor-x: 0px;
+    private property <length> anchor-y: 0px;
+    private property <length> cursor-x: 0px;
+    private property <length> cursor-y: 0px;
+    private property <bool> selecting: false;
+    private property <bool> has-selection: false;
+    private property <length> selection-left: min(root.anchor-x, root.cursor-x);
+    private property <length> selection-top: min(root.anchor-y, root.cursor-y);
+    private property <length> selection-right: max(root.anchor-x, root.cursor-x);
+    private property <length> selection-bottom: max(root.anchor-y, root.cursor-y);
+    private property <length> selection-width: root.selection-right - root.selection-left;
+    private property <length> selection-height: root.selection-bottom - root.selection-top;
+    private property <bool> selection-visible: root.selecting || root.has-selection;
+
+    background: black;
+    forward-focus: keyboard-focus;
+
+    function update-cursor(x: length, y: length) {
+        root.cursor-x = max(0px, min(root.width, x));
+        root.cursor-y = max(0px, min(root.height, y));
+    }
+
+    function confirm-current-selection() {
+        if (root.has-selection && root.width > 0px && root.height > 0px) {
+            root.selection-confirmed(
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        }
+    }
+
+    public function reset-selection() {
+        root.anchor-x = 0px;
+        root.anchor-y = 0px;
+        root.cursor-x = 0px;
+        root.cursor-y = 0px;
+        root.selecting = false;
+        root.has-selection = false;
+        keyboard-focus.focus();
+    }
+
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.frozen-frame;
+        image-fit: fill;
+    }
+
+    pointer-input := TouchArea {
+        mouse-cursor: crosshair;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.anchor-x = max(0px, min(root.width, self.mouse-x));
+                root.anchor-y = max(0px, min(root.height, self.mouse-y));
+                root.cursor-x = root.anchor-x;
+                root.cursor-y = root.anchor-y;
+                root.selecting = true;
+                root.has-selection = false;
+                keyboard-focus.focus();
+            }
+
+            if (event.kind == PointerEventKind.up && root.selecting) {
+                root.update-cursor(self.mouse-x, self.mouse-y);
+                root.selecting = false;
+                root.has-selection = root.selection-width >= 3px && root.selection-height >= 3px;
+            }
+
+            if (event.kind == PointerEventKind.cancel) {
+                root.selecting = false;
+            }
+        }
+
+        moved => {
+            if (root.selecting) {
+                root.update-cursor(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+
+    if !root.selection-visible : Rectangle {
+        background: #0000006e;
+    }
+
+    if root.selection-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.selection-top;
+        background: #0000006e;
+    }
+
+    if root.selection-visible : Rectangle {
+        x: 0px;
+        y: root.selection-top;
+        width: root.selection-left;
+        height: root.selection-height;
+        background: #0000006e;
+    }
+
+    if root.selection-visible : Rectangle {
+        x: root.selection-right;
+        y: root.selection-top;
+        width: max(0px, root.width - root.selection-right);
+        height: root.selection-height;
+        background: #0000006e;
+    }
+
+    if root.selection-visible : Rectangle {
+        x: 0px;
+        y: root.selection-bottom;
+        width: root.width;
+        height: max(0px, root.height - root.selection-bottom);
+        background: #0000006e;
+    }
+
+    if root.selection-visible : Rectangle {
+        x: root.selection-left;
+        y: root.selection-top;
+        width: root.selection-width;
+        height: root.selection-height;
+        background: transparent;
+        border-width: 2px;
+        border-color: SnowTheme.focus-ring;
+    }
+
+    Rectangle {
+        x: SnowTheme.space-4;
+        y: SnowTheme.space-4;
+        width: 330px;
+        height: 34px;
+        border-radius: SnowTheme.radius-sm;
+        background: #24272bcc;
+
+        Text {
+            text: root.has-selection
+                ? "拖动可重新框选 · Enter 复制 · Esc 取消"
+                : "拖动鼠标框选区域 · Esc 取消";
+            color: white;
+            font-size: SnowTheme.body-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.has-selection : CaptureToolbar {
+        x: min(
+            root.width - self.width - SnowTheme.space-3,
+            max(SnowTheme.space-3, root.selection-right - self.width),
+        );
+        y: root.selection-bottom + self.height + SnowTheme.space-3 < root.height
+            ? root.selection-bottom + SnowTheme.space-3
+            : max(SnowTheme.space-3, root.selection-top - self.height - SnowTheme.space-3);
+        confirm-clicked => { root.confirm-current-selection(); }
+        cancel-clicked => { root.cancelled(); }
+    }
+
+    keyboard-focus := FocusScope {
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => { root.cancelled(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Return);
+            activated => { root.confirm-current-selection(); }
+        }
+    }
+}

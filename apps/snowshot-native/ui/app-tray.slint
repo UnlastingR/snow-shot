@@ -1,18 +1,23 @@
 export component AppTray inherits SystemTrayIcon {
     callback open-settings();
     callback capture-clicked();
+    callback full-monitor-clicked();
     callback quit-requested();
 
     icon: @image-url("../assets/tray-icon.svg");
     title: "Snow Shot";
-    tooltip: "Snow Shot Native Lite · F1 截图并复制";
+    tooltip: "Snow Shot Native Lite · Alt+F12 区域截图";
 
     clicked => { root.open-settings(); }
 
     Menu {
         MenuItem {
-            title: "截图并复制（F1）";
+            title: "区域截图（Alt+F12）";
             activated => { root.capture-clicked(); }
+        }
+        MenuItem {
+            title: "复制鼠标所在显示器";
+            activated => { root.full-monitor-clicked(); }
         }
         MenuSeparator {}
         MenuItem {

@@ -194,6 +194,74 @@ pub fn crop_rgb_image(
     ))
 }
 
+pub fn crop_rgba_pixels(
+    pixels: &[u8],
+    image_width: u32,
+    image_height: u32,
+    region: PixelRect,
+) -> Result<Vec<u8>, CaptureError> {
+    let expected_len = image_width
+        .checked_mul(image_height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(CaptureError::InvalidRegion)?;
+
+    if pixels.len() != expected_len {
+        return Err(CaptureError::Backend(format!(
+            "RGBA buffer length {} does not match {image_width}x{image_height} image",
+            pixels.len()
+        )));
+    }
+
+    let max_x = region
+        .x()
+        .checked_add(region.width())
+        .ok_or(CaptureError::InvalidRegion)?;
+    let max_y = region
+        .y()
+        .checked_add(region.height())
+        .ok_or(CaptureError::InvalidRegion)?;
+
+    if max_x > image_width || max_y > image_height {
+        return Err(CaptureError::RegionOutOfBounds {
+            image_width,
+            image_height,
+            region,
+        });
+    }
+
+    let source_stride = usize::try_from(image_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(CaptureError::InvalidRegion)?;
+    let row_start = usize::try_from(region.x())
+        .ok()
+        .and_then(|x| x.checked_mul(4))
+        .ok_or(CaptureError::InvalidRegion)?;
+    let row_len = usize::try_from(region.width())
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(CaptureError::InvalidRegion)?;
+    let output_len = row_len
+        .checked_mul(region.height() as usize)
+        .ok_or(CaptureError::InvalidRegion)?;
+    let mut cropped = Vec::with_capacity(output_len);
+
+    for row in region.y()..max_y {
+        let start = usize::try_from(row)
+            .ok()
+            .and_then(|row| row.checked_mul(source_stride))
+            .and_then(|offset| offset.checked_add(row_start))
+            .ok_or(CaptureError::InvalidRegion)?;
+        let end = start
+            .checked_add(row_len)
+            .ok_or(CaptureError::InvalidRegion)?;
+        cropped.extend_from_slice(&pixels[start..end]);
+    }
+
+    Ok(cropped)
+}
+
 pub fn bgra_to_rgb(bgra_data: &[u8]) -> Vec<u8> {
     let pixel_count = bgra_data.len() / 4;
     let mut rgb_data = vec![0; pixel_count * 3];
@@ -285,6 +353,28 @@ mod tests {
             crop_rgb_image(&sample_rgb_image(), PixelRect::new(2, 1, 2, 1).unwrap()).unwrap_err();
 
         assert!(matches!(error, CaptureError::RegionOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn crops_rgba_pixel_buffers_by_pixel_region() {
+        let pixels = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        ];
+
+        let cropped = crop_rgba_pixels(&pixels, 3, 2, PixelRect::new(1, 0, 2, 2).unwrap()).unwrap();
+
+        assert_eq!(
+            cropped,
+            [5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20, 21, 22, 23, 24]
+        );
+    }
+
+    #[test]
+    fn rejects_rgba_pixel_buffers_with_wrong_length() {
+        let error =
+            crop_rgba_pixels(&[0; 15], 2, 2, PixelRect::new(0, 0, 1, 1).unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("does not match 2x2 image"));
     }
 
     #[test]

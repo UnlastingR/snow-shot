@@ -1,0 +1,38 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+import { SnowButton } from "buttons.slint";
+
+export component CaptureToolbar inherits Rectangle {
+    callback confirm-clicked();
+    callback cancel-clicked();
+
+    width: 196px;
+    height: 48px;
+    border-radius: SnowTheme.radius-md;
+    border-width: 1px;
+    border-color: #ffffff26;
+    background: #24272bea;
+    drop-shadow-color: #00000066;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 6px;
+
+    HorizontalLayout {
+        padding-left: SnowTheme.space-2;
+        padding-right: SnowTheme.space-2;
+        padding-top: SnowTheme.space-2;
+        padding-bottom: SnowTheme.space-2;
+        spacing: SnowTheme.space-2;
+
+        SnowButton {
+            width: 82px;
+            label: "取消";
+            clicked => { root.cancel-clicked(); }
+        }
+
+        SnowButton {
+            width: 90px;
+            label: "复制";
+            primary: true;
+            clicked => { root.confirm-clicked(); }
+        }
+    }
+}

@@ -7,6 +7,31 @@ use crate::{CaptureError, PixelFormat, PixelRect};
 pub mod hdr;
 pub mod monitor_hdr_info;
 
+#[derive(Debug)]
+pub struct PositionedMonitorCapture {
+    origin_x: i32,
+    origin_y: i32,
+    image: DynamicImage,
+}
+
+impl PositionedMonitorCapture {
+    pub fn origin_x(&self) -> i32 {
+        self.origin_x
+    }
+
+    pub fn origin_y(&self) -> i32 {
+        self.origin_y
+    }
+
+    pub fn image(&self) -> &DynamicImage {
+        &self.image
+    }
+
+    pub fn into_image(self) -> DynamicImage {
+        self.image
+    }
+}
+
 pub fn capture_monitor(
     monitor: &xcap::Monitor,
     region: Option<PixelRect>,
@@ -35,6 +60,13 @@ pub fn capture_monitor(
 pub fn capture_monitor_under_cursor(
     pixel_format: PixelFormat,
 ) -> Result<DynamicImage, CaptureError> {
+    capture_monitor_under_cursor_with_position(pixel_format)
+        .map(PositionedMonitorCapture::into_image)
+}
+
+pub fn capture_monitor_under_cursor_with_position(
+    pixel_format: PixelFormat,
+) -> Result<PositionedMonitorCapture, CaptureError> {
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }
         .map_err(|error| CaptureError::Backend(format!("read cursor position: {error}")))?;
@@ -53,7 +85,19 @@ pub fn capture_monitor_under_cursor(
             .ok_or_else(|| CaptureError::Backend("no monitor is available".to_string()))?,
     };
 
-    capture_monitor(&monitor, None, pixel_format)
+    let origin_x = monitor
+        .x()
+        .map_err(|error| CaptureError::Backend(format!("read monitor x position: {error}")))?;
+    let origin_y = monitor
+        .y()
+        .map_err(|error| CaptureError::Backend(format!("read monitor y position: {error}")))?;
+    let image = capture_monitor(&monitor, None, pixel_format)?;
+
+    Ok(PositionedMonitorCapture {
+        origin_x,
+        origin_y,
+        image,
+    })
 }
 
 pub fn capture_window(
@@ -79,7 +123,8 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows desktop"]
     fn captures_monitor_under_cursor_on_interactive_desktop() {
-        let image = capture_monitor_under_cursor(PixelFormat::Rgba8).unwrap();
+        let capture = capture_monitor_under_cursor_with_position(PixelFormat::Rgba8).unwrap();
+        let image = capture.image();
 
         assert!(image.width() > 0);
         assert!(image.height() > 0);
