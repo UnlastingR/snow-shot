@@ -8,3 +8,6 @@ workspace = "../../src-tauri"
 [dependencies]
 image = { workspace = true }
 rayon = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = { workspace = true }

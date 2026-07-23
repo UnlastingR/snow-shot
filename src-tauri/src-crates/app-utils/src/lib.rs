@@ -286,63 +286,37 @@ pub fn capture_target_monitor(
 ) -> Option<image::DynamicImage> {
     #[cfg(target_os = "windows")]
     {
-        let image = if let Some(crop_area) = crop_area {
-            match color_format {
-                ColorFormat::Rgb8 => DynamicImage::ImageRgb8(
-                    match monitor.capture_region_rgb(
-                        crop_area.min_x as u32,
-                        crop_area.min_y as u32,
-                        (crop_area.max_x - crop_area.min_x) as u32,
-                        (crop_area.max_y - crop_area.min_y) as u32,
-                    ) {
-                        Ok(image) => image,
-                        Err(e) => {
-                            log::error!(
-                                "[capture_target_monitor] failed to capture image: {:?}",
-                                e
-                            );
-                            return None;
-                        }
-                    },
-                ),
-                ColorFormat::Rgba8 => DynamicImage::ImageRgba8(
-                    match monitor.capture_region(
-                        crop_area.min_x as u32,
-                        crop_area.min_y as u32,
-                        (crop_area.max_x - crop_area.min_x) as u32,
-                        (crop_area.max_y - crop_area.min_y) as u32,
-                    ) {
-                        Ok(image) => image,
-                        Err(e) => {
-                            log::error!(
-                                "[capture_target_monitor] failed to capture image: {:?}",
-                                e
-                            );
-                            return None;
-                        }
-                    },
-                ),
-            }
-        } else {
-            match color_format {
-                ColorFormat::Rgb8 => DynamicImage::ImageRgb8(match monitor.capture_image_rgb() {
-                    Ok(image) => image,
-                    Err(e) => {
-                        log::error!("[capture_target_monitor] failed to capture image: {:?}", e);
-                        return None;
-                    }
-                }),
-                ColorFormat::Rgba8 => DynamicImage::ImageRgba8(match monitor.capture_image() {
-                    Ok(image) => image,
-                    Err(e) => {
-                        log::error!("[capture_target_monitor] failed to capture image: {:?}", e);
-                        return None;
-                    }
-                }),
-            }
+        let region = match crop_area {
+            Some(crop_area) => match snow_shot_capture::PixelRect::from_bounds(
+                crop_area.min_x,
+                crop_area.min_y,
+                crop_area.max_x,
+                crop_area.max_y,
+            ) {
+                Ok(region) => Some(region),
+                Err(error) => {
+                    log::error!("[capture_target_monitor] invalid capture region: {error}");
+                    return None;
+                }
+            },
+            None => None,
+        };
+        let pixel_format = match color_format {
+            ColorFormat::Rgb8 => snow_shot_capture::PixelFormat::Rgb8,
+            ColorFormat::Rgba8 => snow_shot_capture::PixelFormat::Rgba8,
         };
 
-        return Some(image);
+        return match snow_shot_capture::windows::capture_monitor(
+            monitor,
+            region,
+            pixel_format,
+        ) {
+            Ok(image) => Some(image),
+            Err(error) => {
+                log::error!("[capture_target_monitor] failed to capture image: {error}");
+                None
+            }
+        };
     }
 
     #[cfg(target_os = "macos")]

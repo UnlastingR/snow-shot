@@ -1,9 +1,12 @@
+#[cfg(target_os = "macos")]
 use image::DynamicImage;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Serialize;
 use snow_shot_app_os::ui_automation::UIElements;
 use snow_shot_capture::{ImageEncoder, PixelRect, crop_rgb_image, encode_image};
 
+#[cfg(target_os = "windows")]
+use snow_shot_capture::{PixelFormat, windows as windows_capture_backend};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
@@ -216,16 +219,23 @@ pub async fn capture_focused_window(
         image = match hdr_image {
             Some(image) => image,
             None => {
-                match focused_window.capture_image() {
-                    Ok(image) => DynamicImage::ImageRgba8(image),
+                match windows_capture_backend::capture_window(
+                    &focused_window,
+                    PixelFormat::Rgba8,
+                ) {
+                    Ok(image) => image,
                     Err(_) => {
                         log::warn!("[capture_focused_window] Failed to capture focused window");
                         // 改成捕获当前显示器
 
                         let (_, _, monitor) = snow_shot_app_utils::get_target_monitor()?;
 
-                        match monitor.capture_image() {
-                            Ok(image) => DynamicImage::ImageRgba8(image),
+                        match windows_capture_backend::capture_monitor(
+                            &monitor,
+                            None,
+                            PixelFormat::Rgba8,
+                        ) {
+                            Ok(image) => image,
                             Err(_) => {
                                 return Err(String::from(
                                     "[capture_focused_window] Failed to capture image",

@@ -1,12 +1,15 @@
 use std::fmt;
 
+use image::DynamicImage;
 use image::codecs::avif::AvifEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
-use image::DynamicImage;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
+
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEncoder {
@@ -14,6 +17,12 @@ pub enum ImageEncoder {
     Png,
     Avif,
     Jpeg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    Rgb8,
+    Rgba8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +82,7 @@ impl PixelRect {
 
 #[derive(Debug)]
 pub enum CaptureError {
+    Backend(String),
     Encode(image::ImageError),
     InvalidRegion,
     RegionOutOfBounds {
@@ -88,6 +98,7 @@ pub enum CaptureError {
 impl fmt::Display for CaptureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Backend(error) => write!(formatter, "capture backend failed: {error}"),
             Self::Encode(error) => write!(formatter, "failed to encode image: {error}"),
             Self::InvalidRegion => write!(formatter, "capture region is empty or invalid"),
             Self::RegionOutOfBounds {

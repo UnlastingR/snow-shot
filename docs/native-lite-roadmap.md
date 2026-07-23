@@ -105,7 +105,8 @@ apps/
 - 已覆盖默认/自定义模型路径及 RGBA 转换单测。
 - 已新增 `crates/snowshot-capture`，承载图像编码、像素区域裁剪和 BGRA 颜色转换。
 - 旧 Tauri 截图 command 已复用新 Core，全屏截图不再使用手写裸指针裁剪。
-- 下一步抽离 Windows 11 amd64 平台采集 backend，再实现 macOS arm64 backend。
+- Windows 11 amd64 的 SDR 显示器与焦点窗口采集已迁移到 `snowshot-capture::windows`。
+- Windows HDR 采集暂留在旧兼容层；下一步迁移 HDR，再实现 macOS arm64 backend。
 
 ### Phase 2：Native Lite MVP
 
