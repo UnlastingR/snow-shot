@@ -2,11 +2,12 @@ import { SnowTheme } from "theme/snow-theme.slint";
 import { SettingsShell } from "pages/settings-shell.slint";
 
 export component AppWindow inherits Window {
-    in-out property <string> runtime-status: "Alt+F12：冻结鼠标所在显示器，框选后复制、保存或贴图";
+    in-out property <string> runtime-status: "Alt+F12 截图 · Alt+F11 隐藏或显示全部贴图";
     callback capture-clicked();
     callback autostart-clicked();
     callback close-behavior-clicked();
     callback ocr-config-clicked();
+    callback toggle-pin-visibility-requested();
 
     title: "Snow Shot Native Lite";
     width: 1120px;

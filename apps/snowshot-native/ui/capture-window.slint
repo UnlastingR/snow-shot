@@ -5,6 +5,14 @@ export component CaptureWindow inherits Window {
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback selection-transform-requested(
+        int,
+        float, float, float, float,
+        float, float,
+        float, float,
+        float, float,
+        bool, bool,
+    );
     callback cancelled();
 
     title: "Snow Shot 区域截图";
@@ -20,6 +28,10 @@ export component CaptureWindow inherits Window {
         overlay.focus-selection();
     }
 
+    public function apply-selection(left: float, top: float, right: float, bottom: float) {
+        overlay.apply-selection(left, top, right, bottom);
+    }
+
     overlay := CaptureOverlayPage {
         frozen-frame: root.frozen-frame;
         selection-confirmed(left, top, right, bottom) => {
@@ -30,6 +42,23 @@ export component CaptureWindow inherits Window {
         }
         selection-pin-requested(left, top, right, bottom) => {
             root.selection-pin-requested(left, top, right, bottom);
+        }
+        selection-transform-requested(
+            mode,
+            start-left, start-top, start-right, start-bottom,
+            start-pointer-x, start-pointer-y,
+            pointer-x, pointer-y,
+            canvas-width, canvas-height,
+            preserve-aspect, centered,
+        ) => {
+            root.selection-transform-requested(
+                mode,
+                start-left, start-top, start-right, start-bottom,
+                start-pointer-x, start-pointer-y,
+                pointer-x, pointer-y,
+                canvas-width, canvas-height,
+                preserve-aspect, centered,
+            );
         }
         cancelled => { root.cancelled(); }
     }

@@ -4972,6 +4972,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
@@ -5150,11 +5151,13 @@ name = "snowshot-native"
 version = "0.1.0"
 dependencies = [
  "global-hotkey",
+ "raw-window-handle",
  "rfd",
  "slint",
  "slint-build",
  "snow-shot-capture",
  "snow-shot-clipboard",
+ "windows 0.61.3",
 ]
 
 [[package]]

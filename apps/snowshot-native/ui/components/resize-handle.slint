@@ -1,0 +1,42 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+
+export component ResizeHandle inherits Rectangle {
+    in property <MouseCursor> cursor: nwse-resize;
+    in property <float> idle-opacity: 1;
+    callback drag-started(float, float);
+    callback drag-moved(float, float, bool, bool);
+
+    private property <bool> dragging: false;
+
+    width: 12px;
+    height: 12px;
+    border-radius: SnowTheme.radius-xs;
+    border-width: 2px;
+    border-color: SnowTheme.accent;
+    background: white;
+    opacity: handle-area.has-hover || root.dragging ? 1 : root.idle-opacity;
+
+    handle-area := TouchArea {
+        mouse-cursor: root.cursor;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.dragging = true;
+                root.drag-started(self.mouse-x / 1px, self.mouse-y / 1px);
+            }
+
+            if (event.kind == PointerEventKind.move && root.dragging) {
+                root.drag-moved(
+                    self.mouse-x / 1px,
+                    self.mouse-y / 1px,
+                    event.modifiers.shift,
+                    event.modifiers.control,
+                );
+            }
+
+            if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+            }
+        }
+    }
+}

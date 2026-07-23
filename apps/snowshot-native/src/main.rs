@@ -17,10 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = AppWindow::new()?;
     let tray = AppTray::new()?;
     let capture = CaptureWindow::new()?;
-    let pin = PinWindow::new()?;
     capture.hide()?;
-    pin.hide()?;
-    let _runtime = windows_runtime::WindowsRuntime::start(&app, &tray, &capture, &pin);
+    let _runtime = windows_runtime::WindowsRuntime::start(&app, &tray, &capture);
 
     app.show()?;
     tray.show()?;

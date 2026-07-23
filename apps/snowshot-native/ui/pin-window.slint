@@ -1,8 +1,13 @@
 import { SnowTheme } from "theme/snow-theme.slint";
+import { ResizeHandle } from "components/resize-handle.slint";
 
 export component PinWindow inherits Window {
     in-out property <image> pinned-frame;
+    in-out property <length> shadow-extent: 2px;
     callback move-requested(float, float);
+    callback resize-started(int, float, float);
+    callback resize-moved(int, float, float);
+    callback zoom-requested(float, float, float);
     callback close-clicked();
 
     private property <length> drag-anchor-x: 0px;
@@ -14,38 +19,32 @@ export component PinWindow inherits Window {
     always-on-top: true;
     background: transparent;
 
-    public function focus-pin() {
-        keyboard-focus.focus();
-    }
-
     content := Rectangle {
-        width: root.width;
-        height: root.height;
+        x: 0px;
+        y: 0px;
+        width: max(1px, root.width - root.shadow-extent);
+        height: max(1px, root.height - root.shadow-extent);
         background: transparent;
-        border-width: 1px;
-        border-color: #ffffff3d;
-        forward-focus: keyboard-focus;
+        drop-shadow-color: #00000066;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-x: 2px;
+        drop-shadow-offset-y: 2px;
 
         Image {
-            width: root.width;
-            height: root.height;
+            width: content.width;
+            height: content.height;
             source: root.pinned-frame;
             image-fit: contain;
         }
 
         drag-area := TouchArea {
-            mouse-cursor: move;
+            mouse-cursor: root.dragging ? grabbing : grab;
 
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                     root.drag-anchor-x = self.mouse-x;
                     root.drag-anchor-y = self.mouse-y;
                     root.dragging = true;
-                    keyboard-focus.focus();
-                }
-
-                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                    root.close-clicked();
                 }
 
                 if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
@@ -61,39 +60,130 @@ export component PinWindow inherits Window {
                     );
                 }
             }
-        }
 
-        Rectangle {
-            x: root.width - self.width - SnowTheme.space-2;
-            y: SnowTheme.space-2;
-            width: 28px;
-            height: 28px;
-            border-radius: SnowTheme.radius-sm;
-            background: close-area.pressed
-                ? #111317e8
-                : close-area.has-hover
-                    ? #24272bf2
-                    : #24272bcc;
+            scroll-event(event) => {
+                if (event.modifiers.control && event.delta-y != 0) {
+                    root.zoom-requested(
+                        event.delta-y / 1px,
+                        content.x / 1px + self.mouse-x / 1px,
+                        content.y / 1px + self.mouse-y / 1px,
+                    );
+                    return accept;
+                }
 
-            Text {
-                text: "×";
-                color: white;
-                font-size: 18px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            close-area := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.close-clicked(); }
+                reject
             }
         }
+    }
 
-        keyboard-focus := FocusScope {
-            KeyBinding {
-                keys: @keys(Escape);
-                activated => { root.close-clicked(); }
-            }
+    close-button := Rectangle {
+        x: content.x + content.width - self.width - SnowTheme.space-1;
+        y: content.y + SnowTheme.space-1;
+        width: 28px;
+        height: 28px;
+        border-radius: SnowTheme.radius-sm;
+        opacity: close-area.has-hover || close-area.pressed ? 1 : 0.32;
+        background: close-area.pressed
+            ? #111317f2
+            : close-area.has-hover
+                ? #24272bf2
+                : #24272bd9;
+
+        Text {
+            text: "×";
+            color: white;
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        close-area := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.close-clicked(); }
+        }
+    }
+
+    top-left := ResizeHandle {
+        x: 0px;
+        y: 0px;
+        cursor: nwse-resize;
+        idle-opacity: 0.22;
+        drag-started(local-x, local-y) => {
+            root.resize-started(
+                1,
+                top-left.x / 1px + local-x,
+                top-left.y / 1px + local-y,
+            );
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.resize-moved(
+                1,
+                top-left.x / 1px + local-x,
+                top-left.y / 1px + local-y,
+            );
+        }
+    }
+
+    top-right := ResizeHandle {
+        x: content.width - self.width;
+        y: 0px;
+        cursor: nesw-resize;
+        idle-opacity: 0.22;
+        drag-started(local-x, local-y) => {
+            root.resize-started(
+                2,
+                top-right.x / 1px + local-x,
+                top-right.y / 1px + local-y,
+            );
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.resize-moved(
+                2,
+                top-right.x / 1px + local-x,
+                top-right.y / 1px + local-y,
+            );
+        }
+    }
+
+    bottom-left := ResizeHandle {
+        x: 0px;
+        y: content.height - self.height;
+        cursor: nesw-resize;
+        idle-opacity: 0.22;
+        drag-started(local-x, local-y) => {
+            root.resize-started(
+                3,
+                bottom-left.x / 1px + local-x,
+                bottom-left.y / 1px + local-y,
+            );
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.resize-moved(
+                3,
+                bottom-left.x / 1px + local-x,
+                bottom-left.y / 1px + local-y,
+            );
+        }
+    }
+
+    bottom-right := ResizeHandle {
+        x: content.width - self.width;
+        y: content.height - self.height;
+        cursor: nwse-resize;
+        idle-opacity: 0.22;
+        drag-started(local-x, local-y) => {
+            root.resize-started(
+                4,
+                bottom-right.x / 1px + local-x,
+                bottom-right.y / 1px + local-y,
+            );
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.resize-moved(
+                4,
+                bottom-right.x / 1px + local-x,
+                bottom-right.y / 1px + local-y,
+            );
         }
     }
 }

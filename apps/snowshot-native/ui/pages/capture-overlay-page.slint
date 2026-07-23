@@ -1,11 +1,20 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
 import { CaptureToolbar } from "../components/capture-toolbar.slint";
+import { ResizeHandle } from "../components/resize-handle.slint";
 
 export component CaptureOverlayPage inherits Rectangle {
     in property <image> frozen-frame;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback selection-transform-requested(
+        int,
+        float, float, float, float,
+        float, float,
+        float, float,
+        float, float,
+        bool, bool,
+    );
     callback cancelled();
 
     private property <length> anchor-x: 0px;
@@ -14,6 +23,12 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> cursor-y: 0px;
     private property <bool> selecting: false;
     private property <bool> has-selection: false;
+    private property <length> transform-start-left: 0px;
+    private property <length> transform-start-top: 0px;
+    private property <length> transform-start-right: 0px;
+    private property <length> transform-start-bottom: 0px;
+    private property <length> transform-start-pointer-x: 0px;
+    private property <length> transform-start-pointer-y: 0px;
     private property <length> selection-left: min(root.anchor-x, root.cursor-x);
     private property <length> selection-top: min(root.anchor-y, root.cursor-y);
     private property <length> selection-right: max(root.anchor-x, root.cursor-x);
@@ -63,6 +78,40 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    function begin-transform(pointer-x: length, pointer-y: length) {
+        root.transform-start-left = root.selection-left;
+        root.transform-start-top = root.selection-top;
+        root.transform-start-right = root.selection-right;
+        root.transform-start-bottom = root.selection-bottom;
+        root.transform-start-pointer-x = pointer-x;
+        root.transform-start-pointer-y = pointer-y;
+        keyboard-focus.focus();
+    }
+
+    function request-transform(
+        mode: int,
+        pointer-x: length,
+        pointer-y: length,
+        preserve-aspect: bool,
+        centered: bool,
+    ) {
+        root.selection-transform-requested(
+            mode,
+            root.transform-start-left / 1px,
+            root.transform-start-top / 1px,
+            root.transform-start-right / 1px,
+            root.transform-start-bottom / 1px,
+            root.transform-start-pointer-x / 1px,
+            root.transform-start-pointer-y / 1px,
+            pointer-x / 1px,
+            pointer-y / 1px,
+            root.width / 1px,
+            root.height / 1px,
+            preserve-aspect,
+            centered,
+        );
+    }
+
     public function reset-selection() {
         root.anchor-x = 0px;
         root.anchor-y = 0px;
@@ -75,6 +124,15 @@ export component CaptureOverlayPage inherits Rectangle {
 
     public function focus-selection() {
         keyboard-focus.focus();
+    }
+
+    public function apply-selection(left: float, top: float, right: float, bottom: float) {
+        root.anchor-x = left * 1px;
+        root.anchor-y = top * 1px;
+        root.cursor-x = right * 1px;
+        root.cursor-y = bottom * 1px;
+        root.selecting = false;
+        root.has-selection = true;
     }
 
     Image {
@@ -162,17 +220,113 @@ export component CaptureOverlayPage inherits Rectangle {
         border-color: SnowTheme.focus-ring;
     }
 
+    if root.has-selection : TouchArea {
+        x: root.selection-left;
+        y: root.selection-top;
+        width: root.selection-width;
+        height: root.selection-height;
+        mouse-cursor: move;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.begin-transform(self.x + self.mouse-x, self.y + self.mouse-y);
+            }
+
+            if (event.kind == PointerEventKind.move && self.pressed) {
+                root.request-transform(
+                    0,
+                    self.x + self.mouse-x,
+                    self.y + self.mouse-y,
+                    false,
+                    false,
+                );
+            }
+        }
+    }
+
+    if root.has-selection : ResizeHandle {
+        x: root.selection-left - self.width / 2;
+        y: root.selection-top - self.height / 2;
+        cursor: nwse-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                1,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.has-selection : ResizeHandle {
+        x: root.selection-right - self.width / 2;
+        y: root.selection-top - self.height / 2;
+        cursor: nesw-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                2,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.has-selection : ResizeHandle {
+        x: root.selection-left - self.width / 2;
+        y: root.selection-bottom - self.height / 2;
+        cursor: nesw-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                3,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.has-selection : ResizeHandle {
+        x: root.selection-right - self.width / 2;
+        y: root.selection-bottom - self.height / 2;
+        cursor: nwse-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                4,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
     Rectangle {
         x: SnowTheme.space-4;
         y: SnowTheme.space-4;
-        width: 330px;
+        width: 520px;
         height: 34px;
         border-radius: SnowTheme.radius-sm;
         background: #24272bcc;
 
         Text {
             text: root.has-selection
-                ? "重新框选 · Enter 复制 · 工具栏可保存或贴图"
+                ? "框内拖动移动 · 四角缩放 · Shift 等比 · Ctrl 中心缩放"
                 : "拖动鼠标框选区域 · Esc 取消";
             color: white;
             font-size: SnowTheme.body-size;

@@ -1,14 +1,22 @@
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::rc::{Rc, Weak as RcWeak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{
     CloseRequestResponse, ComponentHandle, Image, PhysicalPosition, PhysicalSize, Rgba8Pixel,
     SharedPixelBuffer,
 };
 use snow_shot_capture::PixelRect;
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+};
 
 use crate::capture_workflow::{
     CaptureWorkflowError, FrozenMonitorFrame, FrozenRegionFrame, capture_monitor_to_clipboard,
@@ -18,54 +26,160 @@ use crate::capture_workflow::{
 use crate::{AppTray, AppWindow, CaptureWindow, PinWindow};
 
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
+const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
+const PIN_SHADOW_EXTENT_PHYSICAL: u32 = 2;
+const PIN_MIN_WIDTH: f32 = 96.0;
+const PIN_MIN_HEIGHT: f32 = 64.0;
+const PIN_MAX_WIDTH: f32 = 4096.0;
+const PIN_MAX_HEIGHT: f32 = 4096.0;
 type SharedFrame = Arc<Mutex<Option<FrozenMonitorFrame>>>;
+type SharedPins = Rc<RefCell<PinCollection>>;
+type WeakPins = RcWeak<RefCell<PinCollection>>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FloatPoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FloatRect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl FloatRect {
+    fn width(self) -> f32 {
+        self.right - self.left
+    }
+
+    fn height(self) -> f32 {
+        self.bottom - self.top
+    }
+
+    fn center(self) -> FloatPoint {
+        FloatPoint {
+            x: (self.left + self.right) / 2.0,
+            y: (self.top + self.bottom) / 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeCorner {
+    fn from_mode(mode: i32) -> Option<Self> {
+        match mode {
+            1 => Some(Self::TopLeft),
+            2 => Some(Self::TopRight),
+            3 => Some(Self::BottomLeft),
+            4 => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+
+    fn horizontal_sign(self) -> f32 {
+        match self {
+            Self::TopLeft | Self::BottomLeft => -1.0,
+            Self::TopRight | Self::BottomRight => 1.0,
+        }
+    }
+
+    fn vertical_sign(self) -> f32 {
+        match self {
+            Self::TopLeft | Self::TopRight => -1.0,
+            Self::BottomLeft | Self::BottomRight => 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeLimits {
+    bounds: Option<FloatRect>,
+    min_width: f32,
+    min_height: f32,
+    max_width: f32,
+    max_height: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PinResizeSession {
+    corner: ResizeCorner,
+    start_rect: FloatRect,
+}
+
+struct PinEntry {
+    id: u64,
+    window: PinWindow,
+    resize_session: Option<PinResizeSession>,
+}
+
+#[derive(Default)]
+struct PinCollection {
+    entries: Vec<PinEntry>,
+    hidden_by_shortcut: bool,
+    next_id: u64,
+}
 
 struct HotkeyRegistration {
     manager: GlobalHotKeyManager,
-    hotkey: HotKey,
+    hotkeys: Vec<HotKey>,
 }
 
 impl Drop for HotkeyRegistration {
     fn drop(&mut self) {
-        let _ = self.manager.unregister(self.hotkey);
+        for hotkey in self.hotkeys.drain(..) {
+            let _ = self.manager.unregister(hotkey);
+        }
     }
 }
 
 pub struct WindowsRuntime {
-    _hotkey: Option<HotkeyRegistration>,
+    _hotkeys: Option<HotkeyRegistration>,
 }
 
 impl WindowsRuntime {
-    pub fn start(
-        app: &AppWindow,
-        tray: &AppTray,
-        capture: &CaptureWindow,
-        pin: &PinWindow,
-    ) -> Self {
+    pub fn start(app: &AppWindow, tray: &AppTray, capture: &CaptureWindow) -> Self {
         app.window()
             .on_close_requested(|| CloseRequestResponse::HideWindow);
 
         let busy = Arc::new(AtomicBool::new(false));
         let frame = Arc::new(Mutex::new(None));
+        let pins = Rc::new(RefCell::new(PinCollection::default()));
 
-        bind_pin_callbacks(pin);
-        bind_capture_callbacks(app, capture, pin, Arc::clone(&busy), Arc::clone(&frame));
+        bind_capture_callbacks(
+            app,
+            capture,
+            Arc::clone(&busy),
+            Arc::clone(&frame),
+            Rc::clone(&pins),
+        );
+        bind_pin_visibility_callback(app, Rc::clone(&pins));
         bind_app_callbacks(app, capture, Arc::clone(&busy), Arc::clone(&frame));
         bind_tray_callbacks(app, tray, capture, Arc::clone(&busy), Arc::clone(&frame));
 
-        let hotkey = register_screenshot_hotkey(app, capture, busy, frame);
+        let hotkeys = register_global_hotkeys(app, capture, busy, frame);
 
-        Self { _hotkey: hotkey }
+        Self { _hotkeys: hotkeys }
     }
 }
 
-fn register_screenshot_hotkey(
+fn register_global_hotkeys(
     app: &AppWindow,
     capture: &CaptureWindow,
     busy: Arc<AtomicBool>,
     frame: SharedFrame,
 ) -> Option<HotkeyRegistration> {
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::F12);
+    let screenshot_hotkey = HotKey::new(Some(Modifiers::ALT), Code::F12);
+    let pin_visibility_hotkey = HotKey::new(Some(Modifiers::ALT), Code::F11);
     let manager = match GlobalHotKeyManager::new() {
         Ok(manager) => manager,
         Err(error) => {
@@ -76,18 +190,39 @@ fn register_screenshot_hotkey(
         }
     };
 
-    if let Err(error) = manager.register(hotkey) {
+    if let Err(error) = manager.register(screenshot_hotkey) {
         app.set_runtime_status(
             format!("{SCREENSHOT_SHORTCUT} 注册失败：{error}。仍可使用界面或托盘截图。").into(),
         );
         return None;
     }
 
-    let hotkey_id = hotkey.id();
+    let screenshot_hotkey_id = screenshot_hotkey.id();
+    let mut hotkeys = vec![screenshot_hotkey];
+    let pin_visibility_hotkey_id = match manager.register(pin_visibility_hotkey) {
+        Ok(()) => {
+            hotkeys.push(pin_visibility_hotkey);
+            Some(pin_visibility_hotkey.id())
+        }
+        Err(error) => {
+            app.set_runtime_status(
+                format!(
+                    "{PIN_VISIBILITY_SHORTCUT} 注册失败：{error}。{SCREENSHOT_SHORTCUT} 截图仍可使用。"
+                )
+                .into(),
+            );
+            None
+        }
+    };
+
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.id == hotkey_id && event.state == HotKeyState::Pressed {
+        if event.state != HotKeyState::Pressed {
+            return;
+        }
+
+        if event.id == screenshot_hotkey_id {
             let app_weak = app_weak.clone();
             let capture_weak = capture_weak.clone();
             let busy = Arc::clone(&busy);
@@ -95,21 +230,31 @@ fn register_screenshot_hotkey(
             let _ = slint::invoke_from_event_loop(move || {
                 request_region_capture(app_weak, capture_weak, busy, frame);
             });
+        } else if pin_visibility_hotkey_id.is_some_and(|id| event.id == id) {
+            let app_weak = app_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.invoke_toggle_pin_visibility_requested();
+                }
+            });
         }
     }));
-    app.set_runtime_status(
-        format!("{SCREENSHOT_SHORTCUT} 已启用：拖动框选，可复制、保存或贴图；Esc 取消。").into(),
-    );
+    if pin_visibility_hotkey_id.is_some() {
+        app.set_runtime_status(
+            format!("{SCREENSHOT_SHORTCUT} 截图；{PIN_VISIBILITY_SHORTCUT} 隐藏或显示全部贴图。")
+                .into(),
+        );
+    }
 
-    Some(HotkeyRegistration { manager, hotkey })
+    Some(HotkeyRegistration { manager, hotkeys })
 }
 
 fn bind_capture_callbacks(
     app: &AppWindow,
     capture: &CaptureWindow,
-    pin: &PinWindow,
     busy: Arc<AtomicBool>,
     frame: SharedFrame,
+    pins: SharedPins,
 ) {
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
@@ -219,9 +364,9 @@ fn bind_capture_callbacks(
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let pin_weak = pin.as_weak();
     let pin_busy = Arc::clone(&busy);
     let pin_frame = Arc::clone(&frame);
+    let presented_pins = Rc::clone(&pins);
     capture.on_selection_pin_requested(move |left, top, right, bottom| {
         let result = pin_frame
             .lock()
@@ -244,10 +389,7 @@ fn bind_capture_callbacks(
                 ))
             })
             .and_then(|(origin_x, origin_y, pinned)| {
-                let pin = pin_weak
-                    .upgrade()
-                    .ok_or_else(|| "贴图窗口已不可用。".to_string())?;
-                present_pinned_frame(&pin, pinned, origin_x, origin_y)
+                create_pinned_frame(&app_weak, &presented_pins, pinned, origin_x, origin_y)
             });
 
         match result {
@@ -261,6 +403,59 @@ fn bind_capture_callbacks(
             Err(error) => set_status(&app_weak, &error),
         }
     });
+
+    let capture_weak = capture.as_weak();
+    capture.on_selection_transform_requested(
+        move |mode,
+              start_left,
+              start_top,
+              start_right,
+              start_bottom,
+              start_pointer_x,
+              start_pointer_y,
+              pointer_x,
+              pointer_y,
+              canvas_width,
+              canvas_height,
+              preserve_aspect,
+              centered| {
+            let start = FloatRect {
+                left: start_left,
+                top: start_top,
+                right: start_right,
+                bottom: start_bottom,
+            };
+            let transformed = transform_selection(
+                mode,
+                start,
+                FloatPoint {
+                    x: start_pointer_x,
+                    y: start_pointer_y,
+                },
+                FloatPoint {
+                    x: pointer_x,
+                    y: pointer_y,
+                },
+                FloatRect {
+                    left: 0.0,
+                    top: 0.0,
+                    right: canvas_width,
+                    bottom: canvas_height,
+                },
+                preserve_aspect,
+                centered,
+            );
+
+            if let (Some(capture), Some(transformed)) = (capture_weak.upgrade(), transformed) {
+                capture.invoke_apply_selection(
+                    transformed.left,
+                    transformed.top,
+                    transformed.right,
+                    transformed.bottom,
+                );
+            }
+        },
+    );
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
@@ -289,7 +484,12 @@ fn bind_capture_callbacks(
     });
 }
 
-fn bind_pin_callbacks(pin: &PinWindow) {
+fn bind_pin_callbacks(
+    app_weak: slint::Weak<AppWindow>,
+    pin: &PinWindow,
+    pins: WeakPins,
+    pin_id: u64,
+) {
     let pin_weak = pin.as_weak();
     pin.on_move_requested(move |delta_x, delta_y| {
         let Some(pin) = pin_weak.upgrade() else {
@@ -306,12 +506,132 @@ fn bind_pin_callbacks(pin: &PinWindow) {
     });
 
     let pin_weak = pin.as_weak();
-    pin.on_close_clicked(move || hide_pin(&pin_weak));
+    let resize_pins = pins.clone();
+    pin.on_resize_started(move |mode, _pointer_x, _pointer_y| {
+        let Some(pin) = pin_weak.upgrade() else {
+            return;
+        };
+        let Some(corner) = ResizeCorner::from_mode(mode) else {
+            return;
+        };
+        let Some(pins) = resize_pins.upgrade() else {
+            return;
+        };
+        if let Some(entry) = pins
+            .borrow_mut()
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == pin_id)
+        {
+            entry.resize_session = Some(PinResizeSession {
+                corner,
+                start_rect: pin_window_rect(&pin),
+            });
+        }
+    });
+
+    let resize_app_weak = app_weak.clone();
+    let pin_weak = pin.as_weak();
+    let resize_pins = pins.clone();
+    pin.on_resize_moved(move |_mode, pointer_x, pointer_y| {
+        let Some(pin) = pin_weak.upgrade() else {
+            return;
+        };
+        let session = resize_pins.upgrade().and_then(|pins| {
+            pins.borrow()
+                .entries
+                .iter()
+                .find(|entry| entry.id == pin_id)
+                .and_then(|entry| entry.resize_session)
+        });
+        let Some(session) = session else {
+            return;
+        };
+
+        let pointer = cursor_screen_position()
+            .unwrap_or_else(|| pin_pointer_screen(&pin, pointer_x, pointer_y));
+        let aspect = session.start_rect.width() / session.start_rect.height();
+        let resized = resize_rect_from_pointer(
+            session.start_rect,
+            pointer,
+            session.corner,
+            true,
+            false,
+            aspect,
+            ResizeLimits {
+                bounds: None,
+                min_width: PIN_MIN_WIDTH,
+                min_height: PIN_MIN_HEIGHT,
+                max_width: PIN_MAX_WIDTH,
+                max_height: PIN_MAX_HEIGHT,
+            },
+        );
+        apply_pin_rect(&pin, resized);
+        set_status(
+            &resize_app_weak,
+            &format!(
+                "贴图缩放为 {}×{}。",
+                resized.width().round() as u32,
+                resized.height().round() as u32
+            ),
+        );
+    });
+
+    let zoom_app_weak = app_weak.clone();
+    let pin_weak = pin.as_weak();
+    pin.on_zoom_requested(move |wheel_delta, pointer_x, pointer_y| {
+        let Some(pin) = pin_weak.upgrade() else {
+            return;
+        };
+        let factor = if wheel_delta > 0.0 {
+            1.1
+        } else if wheel_delta < 0.0 {
+            1.0 / 1.1
+        } else {
+            return;
+        };
+        let rect = pin_window_rect(&pin);
+        let anchor = cursor_screen_position()
+            .unwrap_or_else(|| pin_pointer_screen(&pin, pointer_x, pointer_y));
+        let scaled = scale_rect_around_point(
+            rect,
+            anchor,
+            factor,
+            ResizeLimits {
+                bounds: None,
+                min_width: PIN_MIN_WIDTH,
+                min_height: PIN_MIN_HEIGHT,
+                max_width: PIN_MAX_WIDTH,
+                max_height: PIN_MAX_HEIGHT,
+            },
+        );
+        apply_pin_rect(&pin, scaled);
+        set_status(
+            &zoom_app_weak,
+            &format!(
+                "贴图缩放为 {}×{}。",
+                scaled.width().round() as u32,
+                scaled.height().round() as u32
+            ),
+        );
+    });
 
     let pin_weak = pin.as_weak();
+    let close_pins = pins.clone();
+    pin.on_close_clicked(move || close_pin(&pin_weak, &close_pins, pin_id));
+
+    let pin_weak = pin.as_weak();
+    let close_pins = pins;
     pin.window().on_close_requested(move || {
-        hide_pin(&pin_weak);
+        close_pin(&pin_weak, &close_pins, pin_id);
         CloseRequestResponse::HideWindow
+    });
+}
+
+fn bind_pin_visibility_callback(app: &AppWindow, pins: SharedPins) {
+    let app_weak = app.as_weak();
+    app.on_toggle_pin_visibility_requested(move || {
+        toggle_pin_visibility(&app_weak, &pins);
     });
 }
 
@@ -519,8 +839,9 @@ fn present_frozen_frame(capture: &CaptureWindow, frame: &FrozenMonitorFrame) -> 
     Ok(())
 }
 
-fn present_pinned_frame(
-    pin: &PinWindow,
+fn create_pinned_frame(
+    app_weak: &slint::Weak<AppWindow>,
+    pins: &SharedPins,
     frame: FrozenRegionFrame,
     origin_x: i32,
     origin_y: i32,
@@ -531,15 +852,53 @@ fn present_pinned_frame(
     }
     pixels.make_mut_bytes().copy_from_slice(frame.rgba());
 
+    let pin = PinWindow::new().map_err(|error| format!("无法创建贴图窗口：{error}"))?;
+    let pin_id = {
+        let mut collection = pins.borrow_mut();
+        let id = collection.next_id;
+        collection.next_id = collection.next_id.wrapping_add(1);
+        id
+    };
+    bind_pin_callbacks(app_weak.clone(), &pin, Rc::downgrade(pins), pin_id);
+
     let (window_width, window_height) = fitted_pin_size(frame.width(), frame.height());
     pin.set_pinned_frame(Image::from_rgba8(pixels));
     pin.window()
         .set_position(PhysicalPosition::new(origin_x, origin_y));
-    pin.window()
-        .set_size(PhysicalSize::new(window_width, window_height));
+    let scale = pin.window().scale_factor().max(0.1);
+    pin.set_shadow_extent(PIN_SHADOW_EXTENT_PHYSICAL as f32 / scale);
+    pin.window().set_size(PhysicalSize::new(
+        window_width.saturating_add(PIN_SHADOW_EXTENT_PHYSICAL),
+        window_height.saturating_add(PIN_SHADOW_EXTENT_PHYSICAL),
+    ));
+
+    let pins_to_restore = {
+        let mut collection = pins.borrow_mut();
+        let restore = collection.hidden_by_shortcut;
+        collection.hidden_by_shortcut = false;
+        restore.then(|| {
+            collection
+                .entries
+                .iter()
+                .map(|entry| entry.window.as_weak())
+                .collect::<Vec<_>>()
+        })
+    };
+    if let Some(pins_to_restore) = pins_to_restore {
+        for pin_weak in pins_to_restore {
+            if let Some(existing_pin) = pin_weak.upgrade() {
+                let _ = existing_pin.show();
+            }
+        }
+    }
+
     pin.show()
         .map_err(|error| format!("无法显示贴图窗口：{error}"))?;
-    pin.invoke_focus_pin();
+    pins.borrow_mut().entries.push(PinEntry {
+        id: pin_id,
+        window: pin,
+        resize_session: None,
+    });
 
     Ok((frame.width(), frame.height()))
 }
@@ -581,6 +940,212 @@ fn normalized_region(
 
     PixelRect::new(x, y, max_x.saturating_sub(x), max_y.saturating_sub(y))
         .map_err(CaptureWorkflowError::Capture)
+}
+
+fn transform_selection(
+    mode: i32,
+    start: FloatRect,
+    start_pointer: FloatPoint,
+    pointer: FloatPoint,
+    bounds: FloatRect,
+    preserve_aspect: bool,
+    centered: bool,
+) -> Option<FloatRect> {
+    if mode == 0 {
+        return Some(move_rect_within_bounds(
+            start,
+            pointer.x - start_pointer.x,
+            pointer.y - start_pointer.y,
+            bounds,
+        ));
+    }
+
+    let corner = ResizeCorner::from_mode(mode)?;
+    let aspect = start.width() / start.height();
+    Some(resize_rect_from_pointer(
+        start,
+        pointer,
+        corner,
+        preserve_aspect,
+        centered,
+        aspect,
+        ResizeLimits {
+            bounds: Some(bounds),
+            min_width: 6.0,
+            min_height: 6.0,
+            max_width: bounds.width(),
+            max_height: bounds.height(),
+        },
+    ))
+}
+
+fn move_rect_within_bounds(
+    rect: FloatRect,
+    delta_x: f32,
+    delta_y: f32,
+    bounds: FloatRect,
+) -> FloatRect {
+    let left = (rect.left + delta_x).clamp(bounds.left, bounds.right - rect.width());
+    let top = (rect.top + delta_y).clamp(bounds.top, bounds.bottom - rect.height());
+
+    FloatRect {
+        left,
+        top,
+        right: left + rect.width(),
+        bottom: top + rect.height(),
+    }
+}
+
+fn resize_rect_from_pointer(
+    start: FloatRect,
+    pointer: FloatPoint,
+    corner: ResizeCorner,
+    preserve_aspect: bool,
+    centered: bool,
+    aspect: f32,
+    limits: ResizeLimits,
+) -> FloatRect {
+    let horizontal_sign = corner.horizontal_sign();
+    let vertical_sign = corner.vertical_sign();
+    let center = start.center();
+    let (fixed_x, fixed_y, raw_width, raw_height) = if centered {
+        (
+            center.x,
+            center.y,
+            horizontal_sign * (pointer.x - center.x) * 2.0,
+            vertical_sign * (pointer.y - center.y) * 2.0,
+        )
+    } else {
+        let fixed_x = if horizontal_sign > 0.0 {
+            start.left
+        } else {
+            start.right
+        };
+        let fixed_y = if vertical_sign > 0.0 {
+            start.top
+        } else {
+            start.bottom
+        };
+        (
+            fixed_x,
+            fixed_y,
+            horizontal_sign * (pointer.x - fixed_x),
+            vertical_sign * (pointer.y - fixed_y),
+        )
+    };
+
+    let (available_width, available_height) = match limits.bounds {
+        Some(bounds) if centered => (
+            ((fixed_x - bounds.left).min(bounds.right - fixed_x) * 2.0).max(1.0),
+            ((fixed_y - bounds.top).min(bounds.bottom - fixed_y) * 2.0).max(1.0),
+        ),
+        Some(bounds) => (
+            if horizontal_sign > 0.0 {
+                bounds.right - fixed_x
+            } else {
+                fixed_x - bounds.left
+            }
+            .max(1.0),
+            if vertical_sign > 0.0 {
+                bounds.bottom - fixed_y
+            } else {
+                fixed_y - bounds.top
+            }
+            .max(1.0),
+        ),
+        None => (limits.max_width, limits.max_height),
+    };
+    let max_width = limits.max_width.min(available_width).max(1.0);
+    let max_height = limits.max_height.min(available_height).max(1.0);
+
+    let (width, height) = if preserve_aspect {
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            start.width() / start.height()
+        };
+        let raw_width = raw_width.max(1.0);
+        let raw_height = raw_height.max(1.0);
+        let width_change = (raw_width / start.width() - 1.0).abs();
+        let height_change = (raw_height / start.height() - 1.0).abs();
+        let (mut width, mut height) = if width_change >= height_change {
+            (raw_width, raw_width / aspect)
+        } else {
+            (raw_height * aspect, raw_height)
+        };
+
+        let grow_for_minimum = (limits.min_width / width)
+            .max(limits.min_height / height)
+            .max(1.0);
+        width *= grow_for_minimum;
+        height *= grow_for_minimum;
+
+        let shrink_for_maximum = (max_width / width).min(max_height / height).min(1.0);
+        width *= shrink_for_maximum;
+        height *= shrink_for_maximum;
+        (width.max(1.0), height.max(1.0))
+    } else {
+        (
+            raw_width.clamp(limits.min_width.min(max_width), max_width),
+            raw_height.clamp(limits.min_height.min(max_height), max_height),
+        )
+    };
+
+    if centered {
+        FloatRect {
+            left: fixed_x - width / 2.0,
+            top: fixed_y - height / 2.0,
+            right: fixed_x + width / 2.0,
+            bottom: fixed_y + height / 2.0,
+        }
+    } else {
+        let (left, right) = if horizontal_sign > 0.0 {
+            (fixed_x, fixed_x + width)
+        } else {
+            (fixed_x - width, fixed_x)
+        };
+        let (top, bottom) = if vertical_sign > 0.0 {
+            (fixed_y, fixed_y + height)
+        } else {
+            (fixed_y - height, fixed_y)
+        };
+        FloatRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+}
+
+fn scale_rect_around_point(
+    rect: FloatRect,
+    anchor: FloatPoint,
+    requested_factor: f32,
+    limits: ResizeLimits,
+) -> FloatRect {
+    let width = rect.width().max(1.0);
+    let height = rect.height().max(1.0);
+    let minimum_factor = (limits.min_width / width)
+        .max(limits.min_height / height)
+        .max(f32::MIN_POSITIVE);
+    let maximum_factor = (limits.max_width / width)
+        .min(limits.max_height / height)
+        .max(minimum_factor);
+    let factor = requested_factor.clamp(minimum_factor, maximum_factor);
+    let anchor_x = ((anchor.x - rect.left) / width).clamp(0.0, 1.0);
+    let anchor_y = ((anchor.y - rect.top) / height).clamp(0.0, 1.0);
+    let new_width = width * factor;
+    let new_height = height * factor;
+    let left = anchor.x - anchor_x * new_width;
+    let top = anchor.y - anchor_y * new_height;
+
+    FloatRect {
+        left,
+        top,
+        right: left + new_width,
+        bottom: top + new_height,
+    }
 }
 
 fn finish_region_capture(
@@ -632,10 +1197,152 @@ fn clear_frame(frame: &SharedFrame) {
     }
 }
 
-fn hide_pin(pin_weak: &slint::Weak<PinWindow>) {
+fn pin_window_rect(pin: &PinWindow) -> FloatRect {
+    let position = pin.window().position();
+    let size = pin.window().size();
+    FloatRect {
+        left: position.x as f32,
+        top: position.y as f32,
+        right: position.x as f32 + size.width as f32,
+        bottom: position.y as f32 + size.height as f32,
+    }
+}
+
+fn pin_pointer_screen(pin: &PinWindow, pointer_x: f32, pointer_y: f32) -> FloatPoint {
+    let position = pin.window().position();
+    let scale = pin.window().scale_factor();
+    FloatPoint {
+        x: position.x as f32 + pointer_x * scale,
+        y: position.y as f32 + pointer_y * scale,
+    }
+}
+
+fn cursor_screen_position() -> Option<FloatPoint> {
+    let mut point = POINT::default();
+    // SAFETY: `point` is a valid writable POINT for the duration of the Win32 call.
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    Some(FloatPoint {
+        x: point.x as f32,
+        y: point.y as f32,
+    })
+}
+
+fn pin_native_hwnd(pin: &PinWindow) -> Option<HWND> {
+    let handle = pin.window().window_handle();
+    let raw = handle.window_handle().ok()?.as_raw();
+    let RawWindowHandle::Win32(handle) = raw else {
+        return None;
+    };
+    Some(HWND(handle.hwnd.get() as *mut c_void))
+}
+
+fn apply_pin_rect(pin: &PinWindow, rect: FloatRect) {
+    let left = rect.left.round() as i32;
+    let top = rect.top.round() as i32;
+    let width = rect.width().round().max(1.0) as i32;
+    let height = rect.height().round().max(1.0) as i32;
+
+    if let Some(hwnd) = pin_native_hwnd(pin) {
+        // SAFETY: the HWND comes from this live Slint PinWindow and all geometry values are finite.
+        if unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                left,
+                top,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+        }
+        .is_ok()
+        {
+            pin.window().request_redraw();
+            return;
+        }
+    }
+
+    pin.window()
+        .set_size(PhysicalSize::new(width as u32, height as u32));
+    pin.window().set_position(PhysicalPosition::new(left, top));
+}
+
+fn close_pin(pin_weak: &slint::Weak<PinWindow>, pins: &WeakPins, pin_id: u64) {
     if let Some(pin) = pin_weak.upgrade() {
         let _ = pin.hide();
         pin.set_pinned_frame(Image::default());
+    }
+    if let Some(pins) = pins.upgrade() {
+        let mut collection = pins.borrow_mut();
+        collection.entries.retain(|entry| entry.id != pin_id);
+        if collection.entries.is_empty() {
+            collection.hidden_by_shortcut = false;
+        }
+    }
+}
+
+fn toggle_pin_visibility(app_weak: &slint::Weak<AppWindow>, pins: &SharedPins) {
+    let (should_hide, pin_windows) = {
+        let collection = pins.borrow();
+        if collection.entries.is_empty() {
+            set_status(app_weak, "当前没有可隐藏的贴图。");
+            return;
+        }
+        (
+            !collection.hidden_by_shortcut,
+            collection
+                .entries
+                .iter()
+                .map(|entry| entry.window.as_weak())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    let mut first_error = None;
+    for pin_weak in &pin_windows {
+        let Some(pin) = pin_weak.upgrade() else {
+            continue;
+        };
+        let result = if should_hide { pin.hide() } else { pin.show() };
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error.to_string());
+        }
+    }
+
+    if let Some(error) = first_error {
+        set_status(
+            app_weak,
+            &format!(
+                "无法{}全部贴图：{error}",
+                if should_hide { "隐藏" } else { "显示" }
+            ),
+        );
+        return;
+    }
+
+    {
+        let mut collection = pins.borrow_mut();
+        collection.hidden_by_shortcut = should_hide;
+        if should_hide {
+            for entry in &mut collection.entries {
+                entry.resize_session = None;
+            }
+        }
+    }
+
+    let count = pin_windows.len();
+    if should_hide {
+        set_status(
+            app_weak,
+            &format!("{PIN_VISIBILITY_SHORTCUT}：已隐藏 {count} 张贴图。"),
+        );
+    } else {
+        set_status(
+            app_weak,
+            &format!("{PIN_VISIBILITY_SHORTCUT}：已显示 {count} 张贴图。"),
+        );
     }
 }
 
@@ -654,7 +1361,19 @@ fn set_status(app_weak: &slint::Weak<AppWindow>, status: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::fitted_pin_size;
+    use super::{
+        FloatPoint, FloatRect, PIN_MAX_HEIGHT, PIN_MAX_WIDTH, PIN_MIN_HEIGHT, PIN_MIN_WIDTH,
+        ResizeCorner, ResizeLimits, fitted_pin_size, resize_rect_from_pointer,
+        scale_rect_around_point, transform_selection,
+    };
+
+    fn assert_rect(actual: FloatRect, expected: FloatRect) {
+        const EPSILON: f32 = 0.001;
+        assert!((actual.left - expected.left).abs() < EPSILON);
+        assert!((actual.top - expected.top).abs() < EPSILON);
+        assert!((actual.right - expected.right).abs() < EPSILON);
+        assert!((actual.bottom - expected.bottom).abs() < EPSILON);
+    }
 
     #[test]
     fn pin_window_caps_large_regions_without_changing_aspect_ratio() {
@@ -664,5 +1383,240 @@ mod tests {
     #[test]
     fn pin_window_keeps_close_control_reachable_for_small_regions() {
         assert_eq!(fitted_pin_size(20, 10), (128, 64));
+    }
+
+    #[test]
+    fn selection_move_stays_inside_canvas() {
+        let moved = transform_selection(
+            0,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 30.0,
+                bottom: 30.0,
+            },
+            FloatPoint { x: 20.0, y: 20.0 },
+            FloatPoint { x: 95.0, y: 95.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 100.0,
+                bottom: 100.0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(
+            moved,
+            FloatRect {
+                left: 80.0,
+                top: 80.0,
+                right: 100.0,
+                bottom: 100.0,
+            },
+        );
+    }
+
+    #[test]
+    fn selection_corner_resize_tracks_pointer_without_modifiers() {
+        let resized = transform_selection(
+            4,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 50.0,
+                bottom: 30.0,
+            },
+            FloatPoint { x: 50.0, y: 30.0 },
+            FloatPoint { x: 80.0, y: 60.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 80.0,
+                bottom: 60.0,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_preserves_selection_aspect_ratio() {
+        let resized = transform_selection(
+            4,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 50.0,
+                bottom: 30.0,
+            },
+            FloatPoint { x: 50.0, y: 30.0 },
+            FloatPoint { x: 70.0, y: 60.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 110.0,
+                bottom: 60.0,
+            },
+        );
+    }
+
+    #[test]
+    fn control_resizes_selection_around_center() {
+        let resized = transform_selection(
+            4,
+            FloatRect {
+                left: 30.0,
+                top: 30.0,
+                right: 70.0,
+                bottom: 50.0,
+            },
+            FloatPoint { x: 70.0, y: 50.0 },
+            FloatPoint { x: 80.0, y: 70.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 20.0,
+                top: 10.0,
+                right: 80.0,
+                bottom: 70.0,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_and_control_preserve_ratio_and_center() {
+        let resized = transform_selection(
+            4,
+            FloatRect {
+                left: 80.0,
+                top: 80.0,
+                right: 120.0,
+                bottom: 100.0,
+            },
+            FloatPoint { x: 120.0, y: 100.0 },
+            FloatPoint { x: 130.0, y: 120.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 40.0,
+                top: 60.0,
+                right: 160.0,
+                bottom: 120.0,
+            },
+        );
+    }
+
+    #[test]
+    fn pin_corner_resize_always_preserves_ratio() {
+        let resized = resize_rect_from_pointer(
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 400.0,
+                bottom: 200.0,
+            },
+            FloatPoint { x: 600.0, y: 400.0 },
+            ResizeCorner::BottomRight,
+            true,
+            false,
+            2.0,
+            ResizeLimits {
+                bounds: None,
+                min_width: PIN_MIN_WIDTH,
+                min_height: PIN_MIN_HEIGHT,
+                max_width: PIN_MAX_WIDTH,
+                max_height: PIN_MAX_HEIGHT,
+            },
+        );
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 800.0,
+                bottom: 400.0,
+            },
+        );
+    }
+
+    #[test]
+    fn ctrl_wheel_zoom_keeps_pointer_anchor_fixed() {
+        let scaled = scale_rect_around_point(
+            FloatRect {
+                left: 100.0,
+                top: 100.0,
+                right: 300.0,
+                bottom: 200.0,
+            },
+            FloatPoint { x: 100.0, y: 100.0 },
+            1.1,
+            ResizeLimits {
+                bounds: None,
+                min_width: PIN_MIN_WIDTH,
+                min_height: PIN_MIN_HEIGHT,
+                max_width: PIN_MAX_WIDTH,
+                max_height: PIN_MAX_HEIGHT,
+            },
+        );
+
+        assert_rect(
+            scaled,
+            FloatRect {
+                left: 100.0,
+                top: 100.0,
+                right: 320.0,
+                bottom: 210.0,
+            },
+        );
     }
 }
