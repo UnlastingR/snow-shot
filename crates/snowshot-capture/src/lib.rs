@@ -8,6 +8,8 @@ use image::codecs::webp::WebPEncoder;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -220,6 +222,33 @@ pub fn bgra_to_rgba(bgra_data: &[u8]) -> Vec<u8> {
     rgba_data
 }
 
+pub fn dynamic_image_from_bgra(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+) -> Result<DynamicImage, CaptureError> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixel_count| pixel_count.checked_mul(4))
+        .ok_or_else(|| CaptureError::Backend("BGRA frame dimensions are too large".to_string()))?;
+    if data.len() != expected_len {
+        return Err(CaptureError::Backend(format!(
+            "BGRA buffer length {} does not match {width}x{height} frame",
+            data.len()
+        )));
+    }
+
+    match pixel_format {
+        PixelFormat::Rgb8 => image::RgbImage::from_raw(width, height, bgra_to_rgb(data))
+            .map(DynamicImage::ImageRgb8)
+            .ok_or_else(|| CaptureError::Backend("failed to create RGB8 image".to_string())),
+        PixelFormat::Rgba8 => image::RgbaImage::from_raw(width, height, bgra_to_rgba(data))
+            .map(DynamicImage::ImageRgba8)
+            .ok_or_else(|| CaptureError::Backend("failed to create RGBA8 image".to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +302,19 @@ mod tests {
 
         assert_eq!(bgra_to_rgb(&bgra), [1, 2, 3, 10, 20, 30]);
         assert_eq!(bgra_to_rgba(&bgra), [1, 2, 3, 255, 10, 20, 30, 128]);
+    }
+
+    #[test]
+    fn creates_rgb_image_from_bgra_frame() {
+        let image = dynamic_image_from_bgra(&[3, 2, 1, 255], 1, 1, PixelFormat::Rgb8).unwrap();
+
+        assert_eq!(image.to_rgb8().as_raw(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn rejects_bgra_frame_with_wrong_length() {
+        let error = dynamic_image_from_bgra(&[0; 3], 1, 1, PixelFormat::Rgba8).unwrap_err();
+
+        assert!(error.to_string().contains("does not match 1x1 frame"));
     }
 }

@@ -319,147 +319,48 @@ pub fn capture_target_monitor(
 
     #[cfg(target_os = "macos")]
     {
-        if !scap::has_permission() {
-            log::warn!("[capture_current_monitor_with_scap] failed tohas_permission");
-            if !scap::request_permission() {
-                log::warn!("[capture_current_monitor_with_scap] failed to request_permission");
-            }
-
-            // macOS 必须重启应用后生效，所以这里返回 None
-            return None;
-        }
-
-        if monitor
-            .name()
-            .unwrap_or("".to_string())
-            .eq("DeskPad Display")
-        {
-            log::warn!("[capture_current_monitor_with_scap] skip DeskPad Display");
-            return Some(image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)));
-        }
-
-        let monitor_id = match monitor.id() {
-            Ok(id) => id,
-            Err(e) => {
-                log::error!(
-                    "[capture_current_monitor_with_scap] failed to get monitor id: {:?}",
-                    e
-                );
-                return None;
-            }
-        };
-
-        let mut window_id: Option<u32> = None;
-        if let Some(exclude_window) = exclude_window {
-            let ns_handle = match exclude_window.ns_window() {
-                Ok(ns_handle) => ns_handle,
-                Err(_) => {
-                    log::error!("[capture_current_monitor_with_scap] failed to get ns_window");
-                    return None;
-                }
-            };
-            window_id = Some(get_window_id_from_ns_handle(ns_handle));
-        }
-
-        let options = scap::capturer::Options {
-            fps: 1,
-            target: Some(scap::Target::Display(scap::Display {
-                id: monitor_id as u32,
-                title: "".to_string(), // 这里 title 不重要
-                raw_handle: core_graphics_helmer_fork::display::CGDisplay::new(monitor_id),
-            })),
-            show_cursor: false,
-            show_highlight: true,
-            excluded_targets: if let Some(window_id) = window_id {
-                Some(vec![scap::Target::Window(scap::Window {
-                    id: window_id,
-                    title: "Snow Shot - Draw".to_string(),
-                    raw_handle: window_id,
-                })])
-            } else {
-                None
-            },
-            output_type: scap::frame::FrameType::BGRAFrame,
-            output_resolution: scap::capturer::Resolution::Captured,
-            crop_area: if let Some(crop_area) = crop_area {
-                Some(scap::capturer::Area {
-                    origin: scap::capturer::Point {
-                        x: crop_area.min_x as f64,
-                        y: crop_area.min_y as f64,
-                    },
-                    size: scap::capturer::Size {
-                        width: (crop_area.max_x - crop_area.min_x) as f64,
-                        height: (crop_area.max_y - crop_area.min_y) as f64,
-                    },
-                })
-            } else {
-                Some(scap::capturer::Area {
-                    origin: scap::capturer::Point { x: 0.0, y: 0.0 },
-                    size: scap::capturer::Size {
-                        width: monitor.width().unwrap_or(0) as f64,
-                        height: monitor.height().unwrap_or(0) as f64,
-                    },
-                })
-            },
-            ..Default::default()
-        };
-
-        // Create Capturer
-        let capturer = scap::capturer::Capturer::build(options);
-        let mut capturer = match capturer {
-            Ok(capturer) => capturer,
-            Err(e) => {
-                log::error!(
-                    "[capture_current_monitor_with_scap] failed to build capturer: {:?}",
-                    e
-                );
-                return None;
-            }
-        };
-
-        capturer.start_capture();
-        let frame = match capturer.get_next_frame() {
-            Ok(frame) => match frame {
-                scap::frame::Frame::BGRA(frame) => frame,
-                _ => {
-                    log::error!("[capture_current_monitor_with_scap] valid frame type");
-                    return None;
-                }
-            },
-            Err(e) => {
-                log::error!(
-                    "[capture_current_monitor_with_scap] failed to get_next_frame: {:?}",
-                    e
-                );
-                return None;
-            }
-        };
-        capturer.stop_capture();
-
-        match color_format {
-            ColorFormat::Rgb8 => match image::RgbImage::from_raw(
-                frame.width as u32,
-                frame.height as u32,
-                bgra_to_rgb(&frame.data),
+        let region = match crop_area {
+            Some(crop_area) => match snow_shot_capture::PixelRect::from_bounds(
+                crop_area.min_x,
+                crop_area.min_y,
+                crop_area.max_x,
+                crop_area.max_y,
             ) {
-                Some(rgb_image) => Some(image::DynamicImage::ImageRgb8(rgb_image)),
-                None => {
-                    log::error!("[capture_current_monitor_with_scap] failed to create image");
+                Ok(region) => Some(region),
+                Err(error) => {
+                    log::error!("[capture_target_monitor] invalid capture region: {error}");
                     return None;
                 }
             },
-            ColorFormat::Rgba8 => {
-                match image::RgbaImage::from_raw(
-                    frame.width as u32,
-                    frame.height as u32,
-                    bgra_to_rgba(&frame.data),
-                ) {
-                    Some(rgba_image) => Some(image::DynamicImage::ImageRgba8(rgba_image)),
-                    None => {
-                        log::error!("[capture_current_monitor_with_scap] failed to create image");
-                        return None;
-                    }
+            None => None,
+        };
+        let excluded_window_id = match exclude_window {
+            Some(exclude_window) => match exclude_window.ns_window() {
+                Ok(ns_handle) => Some(get_window_id_from_ns_handle(ns_handle)),
+                Err(error) => {
+                    log::error!(
+                        "[capture_target_monitor] failed to get excluded NSWindow: {error}"
+                    );
+                    return None;
                 }
+            },
+            None => None,
+        };
+        let pixel_format = match color_format {
+            ColorFormat::Rgb8 => snow_shot_capture::PixelFormat::Rgb8,
+            ColorFormat::Rgba8 => snow_shot_capture::PixelFormat::Rgba8,
+        };
+
+        match snow_shot_capture::macos::capture_monitor(
+            monitor,
+            region,
+            excluded_window_id,
+            pixel_format,
+        ) {
+            Ok(image) => Some(image),
+            Err(error) => {
+                log::error!("[capture_target_monitor] failed to capture image: {error}");
+                None
             }
         }
     }

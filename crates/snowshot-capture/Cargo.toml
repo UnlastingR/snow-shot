@@ -9,6 +9,11 @@ workspace = "../../src-tauri"
 image = { workspace = true }
 rayon = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics-helmer-fork = "0.24.0"
+scap = { workspace = true }
+xcap = { workspace = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 half = "2.6.0"
 log = { workspace = true }

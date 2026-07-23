@@ -1,12 +1,14 @@
-#[cfg(target_os = "macos")]
-use image::DynamicImage;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Serialize;
 use snow_shot_app_os::ui_automation::UIElements;
 use snow_shot_capture::{ImageEncoder, PixelRect, crop_rgb_image, encode_image};
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use snow_shot_capture::PixelFormat;
+#[cfg(target_os = "macos")]
+use snow_shot_capture::macos as macos_capture_backend;
 #[cfg(target_os = "windows")]
-use snow_shot_capture::{PixelFormat, windows as windows_capture_backend};
+use snow_shot_capture::windows as windows_capture_backend;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
@@ -265,33 +267,33 @@ pub async fn capture_focused_window(
 
     #[cfg(target_os = "macos")]
     {
-        let window_list = xcap::Window::all().unwrap_or_default();
-        let window = window_list.iter().find(|w| {
-            w.is_focused().unwrap_or(false)
-                // 排除某些托盘应用，托盘应用会捕获到托盘图标
-                && w.y().unwrap_or(0) != 0
-                && !w.title().unwrap_or_default().starts_with("Item-")
-        });
-
-        let window_image = match window {
-            Some(window) => match window.capture_image() {
-                Ok(image) => Some(image),
-                Err(_) => None,
-            },
-            None => None,
-        };
+        let window_image =
+            macos_capture_backend::capture_focused_window(PixelFormat::Rgba8).unwrap_or_else(
+                |error| {
+                    log::warn!("[capture_focused_window] Failed to capture window: {error}");
+                    None
+                },
+            );
 
         image = match window_image {
-            Some(image) => DynamicImage::ImageRgba8(image),
+            Some(image) => image,
             None => {
                 log::warn!("[capture_focused_window] Failed to capture focused window");
                 // 改成捕获当前显示器
 
                 let (_, _, monitor) = snow_shot_app_utils::get_target_monitor()?;
 
-                match monitor.capture_image() {
-                    Ok(image) => DynamicImage::ImageRgba8(image),
-                    Err(_) => {
+                match macos_capture_backend::capture_monitor(
+                    &monitor,
+                    None,
+                    None,
+                    PixelFormat::Rgba8,
+                ) {
+                    Ok(image) => image,
+                    Err(error) => {
+                        log::error!(
+                            "[capture_focused_window] Failed to capture monitor: {error}"
+                        );
                         return Err(String::from(
                             "[capture_focused_window] Failed to capture image",
                         ));

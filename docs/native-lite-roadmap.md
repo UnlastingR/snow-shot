@@ -108,7 +108,9 @@ apps/
 - Windows 11 amd64 的 SDR 显示器与焦点窗口采集已迁移到 `snowshot-capture::windows`。
 - Windows HDR 元数据查询、Rgba16F 采集和色彩转换已迁移到 `snowshot-capture::windows`。
 - HDR 像素转换不再使用未初始化缓冲区或裸指针；无边框不受支持时会真正降级重试。
-- 下一步实现 macOS arm64 backend。
+- macOS arm64 的 `scap` 显示器采集、排除窗口和焦点窗口采集已迁移到 `snowshot-capture::macos`。
+- Tauri 适配层仅负责将 `NSWindow` 转成排除窗口 ID；BGRA 帧尺寸校验和颜色转换由 Core 负责。
+- 下一步在 Apple runner 完成原生编译、权限和多显示器实测，再抽离剪贴板 service。
 
 ### Phase 2：Native Lite MVP
 

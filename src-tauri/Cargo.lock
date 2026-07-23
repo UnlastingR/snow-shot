@@ -6840,14 +6840,12 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clipboard-win",
- "core-graphics-helmer-fork",
  "device_query",
  "image",
  "log",
  "macos-accessibility-client",
  "objc2 0.6.4",
  "rayon",
- "scap",
  "serde",
  "snow-shot-app-shared",
  "snow-shot-capture",
@@ -6866,10 +6864,12 @@ dependencies = [
 name = "snow-shot-capture"
 version = "0.1.0"
 dependencies = [
+ "core-graphics-helmer-fork",
  "half",
  "image",
  "log",
  "rayon",
+ "scap",
  "widestring",
  "windows 0.61.3",
  "windows-capture 2.0.0-alpha.7",
