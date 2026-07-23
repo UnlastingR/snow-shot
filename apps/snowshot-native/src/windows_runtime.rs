@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,7 @@ use slint::{
     Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use snow_shot_capture::PixelRect;
+use snow_shot_window::{WindowRect, WindowTarget, list_windows};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 
@@ -48,6 +49,7 @@ struct CaptureSession {
     visible: AtomicBool,
     finishing: AtomicBool,
     frame: Mutex<Option<FrozenMonitorFrame>>,
+    window_targets: Mutex<Vec<WindowTarget>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,6 +64,12 @@ struct FloatRect {
     top: f32,
     right: f32,
     bottom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowPreview {
+    id: u32,
+    rect: FloatRect,
 }
 
 impl FloatRect {
@@ -539,6 +547,32 @@ fn bind_capture_callbacks(
     });
 
     let capture_weak = capture.as_weak();
+    let preview_session = Arc::clone(&session);
+    let last_window_target = Cell::new(None::<u32>);
+    capture.on_window_target_requested(move |x, y, canvas_width, canvas_height| {
+        let preview =
+            window_preview_for_pointer(&preview_session, x, y, canvas_width, canvas_height);
+        if let Some(capture) = capture_weak.upgrade() {
+            match preview {
+                Some(preview) if last_window_target.get() != Some(preview.id) => {
+                    last_window_target.set(Some(preview.id));
+                    capture.invoke_apply_window_preview(
+                        preview.rect.left,
+                        preview.rect.top,
+                        preview.rect.right,
+                        preview.rect.bottom,
+                    );
+                }
+                Some(_) => {}
+                None if last_window_target.take().is_some() => {
+                    capture.invoke_clear_window_preview();
+                }
+                None => {}
+            }
+        }
+    });
+
+    let capture_weak = capture.as_weak();
     capture.on_selection_transform_requested(
         move |mode,
               start_left,
@@ -622,7 +656,7 @@ fn bind_capture_ready_callback(
     app.on_capture_ready(move || {
         let Some(app) = app_weak.upgrade() else {
             session.busy.store(false, Ordering::Release);
-            clear_frame(&session);
+            clear_capture_data(&session);
             return;
         };
 
@@ -637,7 +671,7 @@ fn bind_capture_ready_callback(
             Err(error) => {
                 session.visible.store(false, Ordering::Release);
                 session.busy.store(false, Ordering::Release);
-                clear_frame(&session);
+                clear_capture_data(&session);
                 app.set_runtime_status(error.into());
             }
         }
@@ -775,6 +809,10 @@ fn request_region_capture(app_weak: slint::Weak<AppWindow>, session: SharedCaptu
 
             match result {
                 Ok(frozen) => {
+                    let window_targets = list_windows(&[]).unwrap_or_default();
+                    if let Ok(mut targets) = worker_session.window_targets.lock() {
+                        *targets = window_targets;
+                    }
                     let frame_stored = worker_session
                         .frame
                         .lock()
@@ -795,7 +833,7 @@ fn request_region_capture(app_weak: slint::Weak<AppWindow>, session: SharedCaptu
                     });
 
                     if invoke_result.is_err() {
-                        clear_frame(&worker_session);
+                        clear_capture_data(&worker_session);
                         worker_session.busy.store(false, Ordering::Release);
                     }
                 }
@@ -859,7 +897,7 @@ fn begin_capture(app_weak: &slint::Weak<AppWindow>, session: &CaptureSession) ->
 
     session.visible.store(false, Ordering::Release);
     session.finishing.store(false, Ordering::Release);
-    clear_frame(session);
+    clear_capture_data(session);
     true
 }
 
@@ -930,7 +968,7 @@ fn activate_capture_window(
         Err(error) => {
             session.visible.store(false, Ordering::Release);
             session.busy.store(false, Ordering::Release);
-            clear_frame(&session);
+            clear_capture_data(&session);
             if let Some(capture_window) = capture_window.upgrade() {
                 if let Some(capture) = capture_window.borrow().as_ref() {
                     let _ = capture.hide();
@@ -1013,6 +1051,92 @@ fn fitted_pin_size(width: u32, height: u32) -> (u32, u32) {
     let height = (height * scale).round() as u32;
 
     (width.max(1), height.max(1))
+}
+
+fn window_preview_for_pointer(
+    session: &CaptureSession,
+    x: f32,
+    y: f32,
+    canvas_width: f32,
+    canvas_height: f32,
+) -> Option<WindowPreview> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !canvas_width.is_finite()
+        || !canvas_height.is_finite()
+        || canvas_width <= 0.0
+        || canvas_height <= 0.0
+    {
+        return None;
+    }
+
+    let targets = session.window_targets.lock().ok()?;
+    let frame = session.frame.lock().ok()?;
+    let frame = frame.as_ref()?;
+    if frame.width() == 0 || frame.height() == 0 {
+        return None;
+    }
+
+    let pixel_x = ((x / canvas_width).clamp(0.0, 1.0) * frame.width() as f32)
+        .floor()
+        .min(frame.width().saturating_sub(1) as f32) as i64
+        + frame.origin_x() as i64;
+    let pixel_y = ((y / canvas_height).clamp(0.0, 1.0) * frame.height() as f32)
+        .floor()
+        .min(frame.height().saturating_sub(1) as f32) as i64
+        + frame.origin_y() as i64;
+
+    let target = targets.iter().find(|target| {
+        let rect = target.rect();
+        pixel_x >= rect.min_x() as i64
+            && pixel_x < rect.max_x() as i64
+            && pixel_y >= rect.min_y() as i64
+            && pixel_y < rect.max_y() as i64
+    })?;
+
+    let rect = normalized_window_rect(
+        frame.origin_x(),
+        frame.origin_y(),
+        frame.width(),
+        frame.height(),
+        target.rect(),
+    )?;
+
+    Some(WindowPreview {
+        id: target.id(),
+        rect,
+    })
+}
+
+fn normalized_window_rect(
+    frame_x: i32,
+    frame_y: i32,
+    frame_width: u32,
+    frame_height: u32,
+    window: WindowRect,
+) -> Option<FloatRect> {
+    if frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+
+    let frame_left = frame_x as i64;
+    let frame_top = frame_y as i64;
+    let frame_right = frame_left + frame_width as i64;
+    let frame_bottom = frame_top + frame_height as i64;
+    let left = (window.min_x() as i64).max(frame_left);
+    let top = (window.min_y() as i64).max(frame_top);
+    let right = (window.max_x() as i64).min(frame_right);
+    let bottom = (window.max_y() as i64).min(frame_bottom);
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    Some(FloatRect {
+        left: (left - frame_left) as f32 / frame_width as f32,
+        top: (top - frame_top) as f32 / frame_height as f32,
+        right: (right - frame_left) as f32 / frame_width as f32,
+        bottom: (bottom - frame_top) as f32 / frame_height as f32,
+    })
 }
 
 fn normalized_region(
@@ -1447,7 +1571,7 @@ fn resume_region_capture(
         });
 
     if let Err(error) = show_result {
-        clear_frame(&session);
+        clear_capture_data(&session);
         session.busy.store(false, Ordering::Release);
         set_status(&app_weak, &error);
     } else {
@@ -1491,7 +1615,7 @@ fn complete_region_capture(
     session: &CaptureSession,
     status: String,
 ) {
-    clear_frame(session);
+    clear_capture_data(session);
     session.finishing.store(false, Ordering::Release);
     session.busy.store(false, Ordering::Release);
     set_status(app_weak, &status);
@@ -1501,6 +1625,17 @@ fn clear_frame(session: &CaptureSession) {
     if let Ok(mut current) = session.frame.lock() {
         current.take();
     }
+}
+
+fn clear_window_targets(session: &CaptureSession) {
+    if let Ok(mut targets) = session.window_targets.lock() {
+        targets.clear();
+    }
+}
+
+fn clear_capture_data(session: &CaptureSession) {
+    clear_frame(session);
+    clear_window_targets(session);
 }
 
 fn toggle_pin_visibility(app_weak: &slint::Weak<AppWindow>, pins: &SharedPins) {
@@ -1562,8 +1697,8 @@ fn set_status(app_weak: &slint::Weak<AppWindow>, status: &str) {
 mod tests {
     use super::{
         FloatPoint, FloatRect, PIN_MAX_HEIGHT, PIN_MAX_WIDTH, PIN_MIN_HEIGHT, PIN_MIN_WIDTH,
-        ResizeCorner, ResizeLimits, fitted_pin_size, resize_rect_from_pointer,
-        scale_rect_around_point, transform_selection,
+        ResizeCorner, ResizeLimits, WindowRect, fitted_pin_size, normalized_window_rect,
+        resize_rect_from_pointer, scale_rect_around_point, transform_selection,
     };
 
     fn assert_rect(actual: FloatRect, expected: FloatRect) {
@@ -1582,6 +1717,41 @@ mod tests {
     #[test]
     fn pin_window_keeps_close_control_reachable_for_small_regions() {
         assert_eq!(fitted_pin_size(20, 10), (128, 64));
+    }
+
+    #[test]
+    fn window_preview_clips_to_the_current_monitor() {
+        let preview = normalized_window_rect(
+            -1920,
+            0,
+            1920,
+            1080,
+            WindowRect::new(-2000, -50, -1000, 500).unwrap(),
+        )
+        .unwrap();
+
+        assert_rect(
+            preview,
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 920.0 / 1920.0,
+                bottom: 500.0 / 1080.0,
+            },
+        );
+    }
+
+    #[test]
+    fn window_preview_rejects_windows_outside_the_current_monitor() {
+        let preview = normalized_window_rect(
+            0,
+            0,
+            1920,
+            1080,
+            WindowRect::new(-800, 100, -20, 900).unwrap(),
+        );
+
+        assert!(preview.is_none());
     }
 
     #[test]

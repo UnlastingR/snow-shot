@@ -5146,6 +5146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-shot-window"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "windows 0.61.3",
+ "xcap",
+]
+
+[[package]]
 name = "snowshot-native"
 version = "0.1.0"
 dependencies = [
@@ -5155,6 +5164,7 @@ dependencies = [
  "slint-build",
  "snow-shot-capture",
  "snow-shot-clipboard",
+ "snow-shot-window",
  "windows 0.61.3",
 ]
 

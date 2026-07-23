@@ -6,6 +6,7 @@ export component CaptureWindow inherits Window {
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
         float, float, float, float,
@@ -35,6 +36,14 @@ export component CaptureWindow inherits Window {
         overlay.apply-selection(left, top, right, bottom);
     }
 
+    public function apply-window-preview(left: float, top: float, right: float, bottom: float) {
+        overlay.apply-window-preview(left, top, right, bottom);
+    }
+
+    public function clear-window-preview() {
+        overlay.clear-window-preview();
+    }
+
     overlay := CaptureOverlayPage {
         frozen-frame: root.frozen-frame;
         presentation-active: root.presentation-active;
@@ -46,6 +55,9 @@ export component CaptureWindow inherits Window {
         }
         selection-pin-requested(left, top, right, bottom) => {
             root.selection-pin-requested(left, top, right, bottom);
+        }
+        window-target-requested(x, y, width, height) => {
+            root.window-target-requested(x, y, width, height);
         }
         selection-transform-requested(
             mode,

@@ -9,6 +9,7 @@ export component CaptureOverlayPage inherits Rectangle {
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
         float, float, float, float,
@@ -26,6 +27,17 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> pending-cursor-x: 0px;
     private property <length> pending-cursor-y: 0px;
     private property <bool> cursor-update-pending: false;
+    private property <length> pending-hover-x: 0px;
+    private property <length> pending-hover-y: 0px;
+    private property <bool> hover-update-pending: false;
+    private property <length> window-preview-left: 0px;
+    private property <length> window-preview-top: 0px;
+    private property <length> window-preview-right: 0px;
+    private property <length> window-preview-bottom: 0px;
+    private property <bool> window-preview-visible: false;
+    private property <bool> preview-animation-enabled: false;
+    private property <bool> preview-animation-arm-pending: false;
+    private property <bool> window-click-pending: false;
     private property <bool> selecting: false;
     private property <bool> has-selection: false;
     private property <length> transform-start-left: 0px;
@@ -41,9 +53,27 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> selection-width: root.selection-right - root.selection-left;
     private property <length> selection-height: root.selection-bottom - root.selection-top;
     private property <bool> selection-visible: root.selecting || root.has-selection;
+    private property <bool> highlight-visible:
+        root.selection-visible || root.window-preview-visible;
+    private property <length> highlight-left:
+        root.selection-visible ? root.selection-left : root.window-preview-left;
+    private property <length> highlight-top:
+        root.selection-visible ? root.selection-top : root.window-preview-top;
+    private property <length> highlight-right:
+        root.selection-visible ? root.selection-right : root.window-preview-right;
+    private property <length> highlight-bottom:
+        root.selection-visible ? root.selection-bottom : root.window-preview-bottom;
+    private property <length> highlight-width: root.highlight-right - root.highlight-left;
+    private property <length> highlight-height: root.highlight-bottom - root.highlight-top;
 
     background: black;
     forward-focus: keyboard-focus;
+
+    animate window-preview-left, window-preview-top,
+            window-preview-right, window-preview-bottom {
+        duration: root.preview-animation-enabled ? 105ms : 0ms;
+        easing: cubic-bezier(0.45, 0, 0.55, 1);
+    }
 
     function update-cursor(x: length, y: length) {
         root.cursor-x = max(0px, min(root.width, x));
@@ -125,6 +155,11 @@ export component CaptureOverlayPage inherits Rectangle {
         root.pending-cursor-x = 0px;
         root.pending-cursor-y = 0px;
         root.cursor-update-pending = false;
+        root.hover-update-pending = false;
+        root.window-preview-visible = false;
+        root.preview-animation-enabled = false;
+        root.preview-animation-arm-pending = false;
+        root.window-click-pending = false;
         root.selecting = false;
         root.has-selection = false;
         keyboard-focus.focus();
@@ -141,6 +176,32 @@ export component CaptureOverlayPage inherits Rectangle {
         root.cursor-y = bottom * 1px;
         root.selecting = false;
         root.has-selection = true;
+    }
+
+    public function apply-window-preview(left: float, top: float, right: float, bottom: float) {
+        if (!root.selecting && !root.has-selection && !root.window-click-pending) {
+            if (!root.window-preview-visible) {
+                root.preview-animation-enabled = false;
+            }
+            root.window-preview-left = max(0px, min(root.width, left * root.width));
+            root.window-preview-top = max(0px, min(root.height, top * root.height));
+            root.window-preview-right = max(0px, min(root.width, right * root.width));
+            root.window-preview-bottom = max(0px, min(root.height, bottom * root.height));
+            root.window-preview-visible =
+                root.window-preview-right - root.window-preview-left >= 3px
+                && root.window-preview-bottom - root.window-preview-top >= 3px;
+            if (root.window-preview-visible && !root.preview-animation-enabled) {
+                root.preview-animation-arm-pending = true;
+            }
+        }
+    }
+
+    public function clear-window-preview() {
+        if (!root.selecting && !root.has-selection && !root.window-click-pending) {
+            root.window-preview-visible = false;
+            root.preview-animation-enabled = false;
+            root.preview-animation-arm-pending = false;
+        }
     }
 
     Image {
@@ -163,9 +224,22 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.pending-cursor-x = root.anchor-x;
                 root.pending-cursor-y = root.anchor-y;
                 root.cursor-update-pending = false;
-                root.selecting = true;
+                root.hover-update-pending = false;
+                root.window-click-pending = root.window-preview-visible;
+                root.selecting = !root.window-preview-visible;
                 root.has-selection = false;
                 keyboard-focus.focus();
+            }
+
+            if (event.kind == PointerEventKind.up && root.window-click-pending) {
+                root.window-click-pending = false;
+                root.anchor-x = root.window-preview-left;
+                root.anchor-y = root.window-preview-top;
+                root.cursor-x = root.window-preview-right;
+                root.cursor-y = root.window-preview-bottom;
+                root.has-selection = root.window-preview-visible;
+                root.window-preview-visible = false;
+                root.hover-update-pending = false;
             }
 
             if (event.kind == PointerEventKind.up && root.selecting) {
@@ -177,15 +251,31 @@ export component CaptureOverlayPage inherits Rectangle {
 
             if (event.kind == PointerEventKind.cancel) {
                 root.selecting = false;
+                root.window-click-pending = false;
                 root.cursor-update-pending = false;
+                root.hover-update-pending = false;
             }
-        }
 
-        moved => {
-            if (root.selecting) {
+            if (event.kind == PointerEventKind.move
+                    && root.window-click-pending
+                    && (abs(self.mouse-x - root.anchor-x) >= 4px
+                        || abs(self.mouse-y - root.anchor-y) >= 4px)) {
+                root.window-click-pending = false;
+                root.window-preview-visible = false;
+                root.selecting = true;
                 root.pending-cursor-x = max(0px, min(root.width, self.mouse-x));
                 root.pending-cursor-y = max(0px, min(root.height, self.mouse-y));
                 root.cursor-update-pending = true;
+            } else if (event.kind == PointerEventKind.move && root.selecting) {
+                root.pending-cursor-x = max(0px, min(root.width, self.mouse-x));
+                root.pending-cursor-y = max(0px, min(root.height, self.mouse-y));
+                root.cursor-update-pending = true;
+            } else if (event.kind == PointerEventKind.move
+                    && !root.has-selection
+                    && !root.window-click-pending) {
+                root.pending-hover-x = max(0px, min(root.width, self.mouse-x));
+                root.pending-hover-y = max(0px, min(root.height, self.mouse-y));
+                root.hover-update-pending = true;
             }
         }
     }
@@ -202,47 +292,75 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && !root.selection-visible : Rectangle {
+    Timer {
+        interval: 16ms;
+        running: root.presentation-active
+            && !root.selecting
+            && !root.has-selection
+            && !root.window-click-pending;
+        triggered => {
+            if (root.hover-update-pending) {
+                root.window-target-requested(
+                    root.pending-hover-x / 1px,
+                    root.pending-hover-y / 1px,
+                    root.width / 1px,
+                    root.height / 1px,
+                );
+                root.hover-update-pending = false;
+            }
+        }
+    }
+
+    Timer {
+        interval: 1ms;
+        running: root.preview-animation-arm-pending;
+        triggered => {
+            root.preview-animation-enabled = true;
+            root.preview-animation-arm-pending = false;
+        }
+    }
+
+    if root.presentation-active && !root.highlight-visible : Rectangle {
         background: #0000006e;
     }
 
-    if root.presentation-active && root.selection-visible : Rectangle {
+    if root.presentation-active && root.highlight-visible : Rectangle {
         x: 0px;
         y: 0px;
         width: root.width;
-        height: root.selection-top;
+        height: root.highlight-top;
         background: #0000006e;
     }
 
-    if root.presentation-active && root.selection-visible : Rectangle {
+    if root.presentation-active && root.highlight-visible : Rectangle {
         x: 0px;
-        y: root.selection-bottom;
+        y: root.highlight-bottom;
         width: root.width;
-        height: max(0px, root.height - root.selection-bottom);
+        height: max(0px, root.height - root.highlight-bottom);
         background: #0000006e;
     }
 
-    if root.presentation-active && root.selection-visible : Rectangle {
+    if root.presentation-active && root.highlight-visible : Rectangle {
         x: 0px;
-        y: root.selection-top;
-        width: root.selection-left;
-        height: root.selection-height;
+        y: root.highlight-top;
+        width: root.highlight-left;
+        height: root.highlight-height;
         background: #0000006e;
     }
 
-    if root.presentation-active && root.selection-visible : Rectangle {
-        x: root.selection-right;
-        y: root.selection-top;
-        width: max(0px, root.width - root.selection-right);
-        height: root.selection-height;
+    if root.presentation-active && root.highlight-visible : Rectangle {
+        x: root.highlight-right;
+        y: root.highlight-top;
+        width: max(0px, root.width - root.highlight-right);
+        height: root.highlight-height;
         background: #0000006e;
     }
 
-    if root.presentation-active && root.selection-visible : Rectangle {
-        x: root.selection-left;
-        y: root.selection-top;
-        width: root.selection-width;
-        height: root.selection-height;
+    if root.presentation-active && root.highlight-visible : Rectangle {
+        x: root.highlight-left;
+        y: root.highlight-top;
+        width: root.highlight-width;
+        height: root.highlight-height;
         background: transparent;
         border-width: 2px;
         border-color: SnowTheme.focus-ring;
@@ -435,7 +553,9 @@ export component CaptureOverlayPage inherits Rectangle {
         Text {
             text: root.has-selection
                 ? "框内拖动移动 · 四边/四角缩放 · Shift 等比 · Ctrl 中心缩放"
-                : "拖动鼠标框选区域 · Esc 取消";
+                : root.window-preview-visible
+                    ? "单击选择窗口 · 拖动切换为自由框选 · Esc 取消"
+                    : "移动鼠标智能选窗 · 拖动自由框选 · Esc 取消";
             color: white;
             font-size: SnowTheme.body-size;
             horizontal-alignment: center;
