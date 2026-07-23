@@ -10,4 +10,13 @@ image = { workspace = true }
 rayon = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+half = "2.6.0"
+log = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+windows-capture = "2.0.0-alpha.7"
+widestring = "1.2.0"
 xcap = { workspace = true }

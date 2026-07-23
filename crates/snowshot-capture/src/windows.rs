@@ -2,6 +2,9 @@ use image::DynamicImage;
 
 use crate::{CaptureError, PixelFormat, PixelRect};
 
+pub mod hdr;
+pub mod monitor_hdr_info;
+
 pub fn capture_monitor(
     monitor: &xcap::Monitor,
     region: Option<PixelRect>,

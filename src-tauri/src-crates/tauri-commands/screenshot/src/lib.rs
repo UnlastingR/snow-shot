@@ -146,9 +146,6 @@ pub async fn capture_all_monitors(
 
 #[cfg(target_os = "windows")]
 pub fn capture_window_hdr_image(window: &xcap::Window) -> Option<image::DynamicImage> {
-    use snow_shot_app_utils::monitor_hdr_info::get_all_monitors_sdr_info;
-    use snow_shot_app_utils::monitor_info::MonitorInfo;
-    use snow_shot_app_utils::windows_capture_image;
     use windows::Win32::Foundation::HWND;
 
     // 获取 Windows 所属的显示
@@ -157,7 +154,9 @@ pub fn capture_window_hdr_image(window: &xcap::Window) -> Option<image::DynamicI
         Err(_) => return None,
     };
 
-    let hdr_infos = match get_all_monitors_sdr_info() {
+    let hdr_infos = match
+        windows_capture_backend::monitor_hdr_info::get_all_monitors_sdr_info()
+    {
         Ok(hdr_infos) => hdr_infos,
         Err(e) => {
             log::error!(
@@ -168,11 +167,10 @@ pub fn capture_window_hdr_image(window: &xcap::Window) -> Option<image::DynamicI
         }
     };
 
-    let hdr_info = match hdr_infos.get(
-        MonitorInfo::get_device_name(&monitor)
-            .unwrap_or_default()
-            .as_str(),
-    ) {
+    let device_name =
+        windows_capture_backend::monitor_hdr_info::get_monitor_device_name(&monitor)
+            .unwrap_or_default();
+    let hdr_info = match hdr_infos.get(device_name.as_str()) {
         Some(hdr_info) => hdr_info,
         None => return None,
     };
@@ -181,11 +179,14 @@ pub fn capture_window_hdr_image(window: &xcap::Window) -> Option<image::DynamicI
         return None;
     }
 
-    return match windows_capture_image::capture_monitor_image(
-        &MonitorInfo::new(&monitor, Some(hdr_info.clone())),
-        Some(HWND(window.hwnd().unwrap())),
+    let window_handle = HWND(window.hwnd().ok()?);
+
+    match windows_capture_backend::hdr::capture_hdr_image(
+        &monitor,
+        hdr_info.sdr_white_level,
+        Some(window_handle),
         None,
-        ColorFormat::Rgba8,
+        PixelFormat::Rgba8,
     ) {
         Ok(image) => Some(image),
         Err(error) => {
@@ -195,7 +196,7 @@ pub fn capture_window_hdr_image(window: &xcap::Window) -> Option<image::DynamicI
             );
             None
         }
-    };
+    }
 }
 
 pub async fn capture_focused_window(

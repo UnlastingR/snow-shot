@@ -18,9 +18,7 @@ use zune_jpegxl::JxlSimpleEncoder;
 use crate::monitor_info::{ColorFormat, MonitorList};
 
 #[cfg(target_os = "windows")]
-pub mod monitor_hdr_info;
-#[cfg(target_os = "windows")]
-pub mod windows_capture_image;
+pub use snow_shot_capture::windows::monitor_hdr_info;
 
 pub mod monitor_info;
 

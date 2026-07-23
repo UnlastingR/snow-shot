@@ -10,7 +10,10 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo,
     GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
-use windows::Win32::Graphics::Gdi::DISPLAYCONFIG_COLOR_ENCODING;
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::{
+    DISPLAYCONFIG_COLOR_ENCODING, GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW,
+};
 
 /// 全局标志：如果 get_all_monitors_sdr_info 失败，则禁用后续调用
 static HDR_INFO_DISABLED: AtomicBool = AtomicBool::new(false);
@@ -34,26 +37,52 @@ fn get_sdr_white_level_for_adapter(
     if unsafe { DisplayConfigGetDeviceInfo(&mut sdr_white_level_info.header) } == 0 {
         Ok(sdr_white_level_info.SDRWhiteLevel)
     } else {
-        Err(format!(
-            "[get_sdr_white_level_for_adapter] Failed to get SDR white level"
-        ))
+        Err("[get_sdr_white_level_for_adapter] Failed to get SDR white level".to_string())
     }
 }
 
 /// SDR 显示器信息结构体
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MonitorHdrInfo {
     pub sdr_white_level: u32,
     pub hdr_enabled: bool,
 }
 
-impl Default for MonitorHdrInfo {
-    fn default() -> Self {
-        Self {
-            sdr_white_level: 0,
-            hdr_enabled: false,
-        }
+fn monitor_handle(monitor: &xcap::Monitor) -> Result<HMONITOR, String> {
+    use std::ffi::c_void;
+
+    monitor
+        .id()
+        .map(|id| HMONITOR(id as *mut c_void))
+        .map_err(|error| format!("[monitor_handle] Failed to get monitor id: {error:?}"))
+}
+
+pub fn get_monitor_device_name(monitor: &xcap::Monitor) -> Result<String, String> {
+    let mut monitor_info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: u32::try_from(std::mem::size_of::<MONITORINFOEXW>()).unwrap(),
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        },
+        szDevice: [0; 32],
+    };
+
+    let result = unsafe {
+        GetMonitorInfoW(
+            monitor_handle(monitor)?,
+            std::ptr::addr_of_mut!(monitor_info).cast(),
+        )
+    };
+    if !result.as_bool() {
+        return Err("[get_monitor_device_name] Failed to get monitor info".to_string());
     }
+
+    U16CString::from_vec_truncate(monitor_info.szDevice)
+        .to_string()
+        .map_err(|error| {
+            format!("[get_monitor_device_name] Failed to decode device name: {error:?}")
+        })
 }
 
 /// 获取显示器信息
@@ -88,9 +117,7 @@ pub fn get_all_monitors_sdr_info() -> Result<HashMap<String, MonitorHdrInfo>, St
 
     if number_of_paths == 0 {
         HDR_INFO_DISABLED.store(true, Ordering::Relaxed);
-        return Err(format!(
-            "[get_all_monitors_sdr_info] No display paths found"
-        ));
+        return Err("[get_all_monitors_sdr_info] No display paths found".to_string());
     }
 
     // 获取显示配置路径和模式
@@ -120,6 +147,7 @@ pub fn get_all_monitors_sdr_info() -> Result<HashMap<String, MonitorHdrInfo>, St
             ));
         }
     }
+    paths.truncate(number_of_paths as usize);
 
     // 为每个显示路径获取 SDR 信息
     let mut result = HashMap::new();
@@ -150,9 +178,9 @@ pub fn get_all_monitors_sdr_info() -> Result<HashMap<String, MonitorHdrInfo>, St
             }
         } else {
             HDR_INFO_DISABLED.store(true, Ordering::Relaxed);
-            return Err(format!(
-                "[get_all_monitors_sdr_info] Failed to DisplayConfigGetDeviceInfo"
-            ));
+            return Err(
+                "[get_all_monitors_sdr_info] Failed to DisplayConfigGetDeviceInfo".to_string(),
+            );
         };
 
         // 获取高级颜色信息
@@ -172,19 +200,15 @@ pub fn get_all_monitors_sdr_info() -> Result<HashMap<String, MonitorHdrInfo>, St
         let hdr_enabled =
             if unsafe { DisplayConfigGetDeviceInfo(&mut advanced_color_info.header) } == 0 {
                 let value = unsafe { advanced_color_info.Anonymous.value };
-                let hdr_enabled = (value & 0x2) != 0;
-
-                hdr_enabled
+                (value & 0x2) != 0
             } else {
                 false
             };
 
         // 获取 SDR 白电平
         let sdr_white_level =
-            match get_sdr_white_level_for_adapter(path.targetInfo.adapterId, path.targetInfo.id) {
-                Ok(level) => level,
-                Err(_) => 1000, // 默认 SDR 白电平
-            };
+            get_sdr_white_level_for_adapter(path.targetInfo.adapterId, path.targetInfo.id)
+                .unwrap_or(1000);
 
         result.insert(
             device_name,

@@ -6842,7 +6842,6 @@ dependencies = [
  "clipboard-win",
  "core-graphics-helmer-fork",
  "device_query",
- "half",
  "image",
  "log",
  "macos-accessibility-client",
@@ -6856,9 +6855,7 @@ dependencies = [
  "tauri",
  "tokio",
  "webview2-com",
- "widestring",
  "windows 0.61.3",
- "windows-capture 2.0.0-alpha.7",
  "windows-core 0.61.2",
  "xcap",
  "zune-core",
@@ -6869,8 +6866,13 @@ dependencies = [
 name = "snow-shot-capture"
 version = "0.1.0"
 dependencies = [
+ "half",
  "image",
+ "log",
  "rayon",
+ "widestring",
+ "windows 0.61.3",
+ "windows-capture 2.0.0-alpha.7",
  "xcap",
 ]
 

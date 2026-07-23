@@ -8,8 +8,6 @@ use xcap::Monitor;
 
 #[cfg(target_os = "windows")]
 use crate::monitor_hdr_info::{self, MonitorHdrInfo};
-#[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::HMONITOR;
 
 #[derive(Debug)]
 pub struct MonitorInfo {
@@ -107,57 +105,10 @@ impl MonitorInfo {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn get_monitor_handle(monitor: &Monitor) -> HMONITOR {
-        use std::ffi::c_void;
-
-        HMONITOR(monitor.id().unwrap() as *mut c_void)
-    }
-
     /// 获取显示器设备名称
     #[cfg(target_os = "windows")]
     pub fn get_device_name(monitor: &Monitor) -> Result<String, String> {
-        use widestring::U16CString;
-        use windows::Win32::{
-            Foundation::RECT,
-            Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MONITORINFOEXW},
-        };
-
-        let mut monitor_info = MONITORINFOEXW {
-            monitorInfo: MONITORINFO {
-                cbSize: u32::try_from(std::mem::size_of::<MONITORINFOEXW>()).unwrap(),
-                rcMonitor: RECT::default(),
-                rcWork: RECT::default(),
-                dwFlags: 0,
-            },
-            szDevice: [0; 32],
-        };
-
-        let result = unsafe {
-            GetMonitorInfoW(
-                Self::get_monitor_handle(monitor),
-                std::ptr::addr_of_mut!(monitor_info).cast(),
-            )
-        };
-
-        if !result.as_bool() {
-            return Err(format!(
-                "[MonitorInfo::get_device_name] Failed to get monitor info: {:?}",
-                result
-            ));
-        }
-
-        let device_name = match U16CString::from_vec_truncate(monitor_info.szDevice).to_string() {
-            Ok(name) => name,
-            Err(e) => {
-                return Err(format!(
-                    "[MonitorInfo::get_device_name] Failed to get device name: {:?}",
-                    e
-                ));
-            }
-        };
-
-        Ok(device_name)
+        monitor_hdr_info::get_monitor_device_name(monitor)
     }
 
     pub fn capture(
@@ -178,27 +129,46 @@ impl MonitorInfo {
 
         #[cfg(target_os = "windows")]
         {
-            use crate::windows_capture_image;
-
             let mut capture_hdr_image: Option<image::DynamicImage> = None;
             if self.monitor_hdr_info.hdr_enabled
                 && capture_option.correct_hdr_color_algorithm != CorrectHdrColorAlgorithm::None
             {
-                capture_hdr_image = match windows_capture_image::capture_monitor_image(
-                    &self,
-                    None,
-                    crop_area,
-                    capture_option.color_format,
-                ) {
-                    Ok(image) => Some(image),
-                    Err(e) => {
-                        log::error!(
-                            "[MonitorInfo::capture] Failed to capture HDR monitor image: {:?}",
-                            e
-                        );
+                let hdr_crop_area = crop_area
+                    .map(|crop_area| {
+                        snow_shot_capture::PixelRect::from_bounds(
+                            crop_area.min_x,
+                            crop_area.min_y,
+                            crop_area.max_x,
+                            crop_area.max_y,
+                        )
+                    })
+                    .transpose();
+                let pixel_format = match capture_option.color_format {
+                    ColorFormat::Rgb8 => snow_shot_capture::PixelFormat::Rgb8,
+                    ColorFormat::Rgba8 => snow_shot_capture::PixelFormat::Rgba8,
+                };
+                capture_hdr_image = match hdr_crop_area {
+                    Ok(hdr_crop_area) => match snow_shot_capture::windows::hdr::capture_hdr_image(
+                        &self.monitor,
+                        self.monitor_hdr_info.sdr_white_level,
+                        None,
+                        hdr_crop_area,
+                        pixel_format,
+                    ) {
+                        Ok(image) => Some(image),
+                        Err(e) => {
+                            log::error!(
+                                "[MonitorInfo::capture] Failed to capture HDR monitor image: {:?}",
+                                e
+                            );
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        log::error!("[MonitorInfo::capture] Invalid HDR crop area: {error}");
                         None
                     }
-                }
+                };
             }
 
             return match capture_hdr_image {

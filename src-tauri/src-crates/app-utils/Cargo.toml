@@ -28,9 +28,6 @@ macos-accessibility-client = { workspace = true }
 windows = { workspace = true, features = ["Win32_UI_Magnification"] }
 rayon = { workspace = true }
 image = { workspace = true }
-widestring = "1.2.0"
-windows-capture = "2.0.0-alpha.7"
-half = "2.6.0"
 webview2-com = "0.38.0"
 windows-core = { version = "0.61" }
 snow-shot-webview = { workspace = true }
