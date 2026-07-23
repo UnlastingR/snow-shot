@@ -1,20 +1,11 @@
-import { SnowTheme } from "../theme/snow-theme.slint";
-
-export component ResizeHandle inherits Rectangle {
-    in property <MouseCursor> cursor: nwse-resize;
-    in property <float> idle-opacity: 1;
+export component SelectionEdgeHandle inherits Rectangle {
+    in property <MouseCursor> cursor: ns-resize;
     callback drag-started(float, float);
     callback drag-moved(float, float, bool, bool);
 
     private property <bool> dragging: false;
 
-    width: 12px;
-    height: 12px;
-    border-radius: SnowTheme.radius-xs;
-    border-width: 2px;
-    border-color: SnowTheme.accent;
-    background: white;
-    opacity: handle-area.has-hover || root.dragging ? 1 : root.idle-opacity;
+    background: transparent;
 
     handle-area := TouchArea {
         mouse-cursor: root.cursor;

@@ -1,6 +1,7 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
 import { CaptureToolbar } from "../components/capture-toolbar.slint";
 import { ResizeHandle } from "../components/resize-handle.slint";
+import { SelectionEdgeHandle } from "../components/selection-edge-handle.slint";
 
 export component CaptureOverlayPage inherits Rectangle {
     in property <image> frozen-frame;
@@ -22,9 +23,11 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> anchor-y: 0px;
     private property <length> cursor-x: 0px;
     private property <length> cursor-y: 0px;
+    private property <length> pending-cursor-x: 0px;
+    private property <length> pending-cursor-y: 0px;
+    private property <bool> cursor-update-pending: false;
     private property <bool> selecting: false;
     private property <bool> has-selection: false;
-    private property <bool> transforming: false;
     private property <length> transform-start-left: 0px;
     private property <length> transform-start-top: 0px;
     private property <length> transform-start-right: 0px;
@@ -39,8 +42,7 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> selection-height: root.selection-bottom - root.selection-top;
     private property <bool> selection-visible: root.selecting || root.has-selection;
 
-    background: transparent;
-    opacity: root.presentation-active ? 1 : 0;
+    background: black;
     forward-focus: keyboard-focus;
 
     function update-cursor(x: length, y: length) {
@@ -82,7 +84,6 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     function begin-transform(pointer-x: length, pointer-y: length) {
-        root.transforming = true;
         root.transform-start-left = root.selection-left;
         root.transform-start-top = root.selection-top;
         root.transform-start-right = root.selection-right;
@@ -121,9 +122,11 @@ export component CaptureOverlayPage inherits Rectangle {
         root.anchor-y = 0px;
         root.cursor-x = 0px;
         root.cursor-y = 0px;
+        root.pending-cursor-x = 0px;
+        root.pending-cursor-y = 0px;
+        root.cursor-update-pending = false;
         root.selecting = false;
         root.has-selection = false;
-        root.transforming = false;
         keyboard-focus.focus();
     }
 
@@ -138,7 +141,6 @@ export component CaptureOverlayPage inherits Rectangle {
         root.cursor-y = bottom * 1px;
         root.selecting = false;
         root.has-selection = true;
-        root.transforming = false;
     }
 
     Image {
@@ -158,55 +160,85 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.anchor-y = max(0px, min(root.height, self.mouse-y));
                 root.cursor-x = root.anchor-x;
                 root.cursor-y = root.anchor-y;
+                root.pending-cursor-x = root.anchor-x;
+                root.pending-cursor-y = root.anchor-y;
+                root.cursor-update-pending = false;
                 root.selecting = true;
                 root.has-selection = false;
-                root.transforming = false;
                 keyboard-focus.focus();
             }
 
             if (event.kind == PointerEventKind.up && root.selecting) {
                 root.update-cursor(self.mouse-x, self.mouse-y);
+                root.cursor-update-pending = false;
                 root.selecting = false;
                 root.has-selection = root.selection-width >= 3px && root.selection-height >= 3px;
             }
 
             if (event.kind == PointerEventKind.cancel) {
                 root.selecting = false;
+                root.cursor-update-pending = false;
             }
         }
 
         moved => {
             if (root.selecting) {
-                root.update-cursor(self.mouse-x, self.mouse-y);
+                root.pending-cursor-x = max(0px, min(root.width, self.mouse-x));
+                root.pending-cursor-y = max(0px, min(root.height, self.mouse-y));
+                root.cursor-update-pending = true;
             }
         }
     }
 
-    Rectangle {
-        background: #0000006e;
-    }
-
-    // Moving a clipped duplicate of the full-screen texture on every pointer event causes
-    // damage-region artifacts in transparent FemtoVG windows. Keep drag feedback lightweight
-    // and reveal the undimmed selection only after the geometry settles.
-    if root.has-selection && !root.transforming : Rectangle {
-        x: root.selection-left;
-        y: root.selection-top;
-        width: root.selection-width;
-        height: root.selection-height;
-        clip: true;
-
-        Image {
-            x: -root.selection-left;
-            y: -root.selection-top;
-            width: root.width;
-            height: root.height;
-            source: root.frozen-frame;
-            image-fit: fill;
+    Timer {
+        interval: 8ms;
+        running: root.presentation-active && root.selecting;
+        triggered => {
+            if (root.cursor-update-pending) {
+                root.cursor-x = root.pending-cursor-x;
+                root.cursor-y = root.pending-cursor-y;
+                root.cursor-update-pending = false;
+            }
         }
     }
 
-    if root.selection-visible : Rectangle {
+    if root.presentation-active && !root.selection-visible : Rectangle {
+        background: #0000006e;
+    }
+
+    if root.presentation-active && root.selection-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.selection-top;
+        background: #0000006e;
+    }
+
+    if root.presentation-active && root.selection-visible : Rectangle {
+        x: 0px;
+        y: root.selection-bottom;
+        width: root.width;
+        height: max(0px, root.height - root.selection-bottom);
+        background: #0000006e;
+    }
+
+    if root.presentation-active && root.selection-visible : Rectangle {
+        x: 0px;
+        y: root.selection-top;
+        width: root.selection-left;
+        height: root.selection-height;
+        background: #0000006e;
+    }
+
+    if root.presentation-active && root.selection-visible : Rectangle {
+        x: root.selection-right;
+        y: root.selection-top;
+        width: max(0px, root.width - root.selection-right);
+        height: root.selection-height;
+        background: #0000006e;
+    }
+
+    if root.presentation-active && root.selection-visible : Rectangle {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
@@ -237,10 +269,6 @@ export component CaptureOverlayPage inherits Rectangle {
                     false,
                 );
             }
-
-            if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                root.transforming = false;
-            }
         }
     }
 
@@ -260,7 +288,6 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
-        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -279,7 +306,6 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
-        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -298,7 +324,6 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
-        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -317,10 +342,89 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
-        drag-ended => { root.transforming = false; }
     }
 
-    Rectangle {
+    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+        x: root.selection-left + 6px;
+        y: root.selection-top - 6px;
+        width: max(0px, root.selection-width - 12px);
+        height: 12px;
+        cursor: ns-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                5,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+        x: root.selection-right - 6px;
+        y: root.selection-top + 6px;
+        width: 12px;
+        height: max(0px, root.selection-height - 12px);
+        cursor: ew-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                6,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+        x: root.selection-left + 6px;
+        y: root.selection-bottom - 6px;
+        width: max(0px, root.selection-width - 12px);
+        height: 12px;
+        cursor: ns-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                7,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+        x: root.selection-left - 6px;
+        y: root.selection-top + 6px;
+        width: 12px;
+        height: max(0px, root.selection-height - 12px);
+        cursor: ew-resize;
+        drag-started(local-x, local-y) => {
+            root.begin-transform(self.x + local-x * 1px, self.y + local-y * 1px);
+        }
+        drag-moved(local-x, local-y, shift, control) => {
+            root.request-transform(
+                8,
+                self.x + local-x * 1px,
+                self.y + local-y * 1px,
+                shift,
+                control,
+            );
+        }
+    }
+
+    if root.presentation-active : Rectangle {
         x: SnowTheme.space-4;
         y: SnowTheme.space-4;
         width: 520px;
@@ -330,7 +434,7 @@ export component CaptureOverlayPage inherits Rectangle {
 
         Text {
             text: root.has-selection
-                ? "框内拖动移动 · 四角缩放 · Shift 等比 · Ctrl 中心缩放"
+                ? "框内拖动移动 · 四边/四角缩放 · Shift 等比 · Ctrl 中心缩放"
                 : "拖动鼠标框选区域 · Esc 取消";
             color: white;
             font-size: SnowTheme.body-size;

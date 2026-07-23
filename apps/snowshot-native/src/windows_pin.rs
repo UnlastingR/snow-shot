@@ -48,6 +48,7 @@ const SHADOW_OFFSET: f32 = 2.0;
 const SHADOW_BLUR: f32 = 6.0;
 const SHADOW_ALPHA: f32 = 0.28;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
+const MIN_PIN_SCALE: f32 = 0.30;
 const MIN_CONTENT_WIDTH: f32 = 96.0;
 const MIN_CONTENT_HEIGHT: f32 = 64.0;
 const MAX_CONTENT_WIDTH: f32 = 4096.0;
@@ -579,10 +580,12 @@ impl NativePinState {
         let factor = 1.1_f32.powf(steps);
         let current_content_width = self.rect.content_width();
         let current_content_height = self.rect.content_height();
+        let (minimum_content_width, minimum_content_height) =
+            minimum_content_size(self.base_content_width, self.base_content_height);
         let target_content_width =
-            (current_content_width * factor).clamp(MIN_CONTENT_WIDTH, MAX_CONTENT_WIDTH);
+            (current_content_width * factor).clamp(minimum_content_width, MAX_CONTENT_WIDTH);
         let target_content_height =
-            (current_content_height * factor).clamp(MIN_CONTENT_HEIGHT, MAX_CONTENT_HEIGHT);
+            (current_content_height * factor).clamp(minimum_content_height, MAX_CONTENT_HEIGHT);
         let applied_factor = (target_content_width / current_content_width)
             .min(target_content_height / current_content_height);
         let content_width = current_content_width * applied_factor;
@@ -810,6 +813,13 @@ fn shadow_extent_for_content(
     (SHADOW_BASE_EXTENT * relative_scale).clamp(SHADOW_MIN_EXTENT, SHADOW_MAX_EXTENT)
 }
 
+fn minimum_content_size(base_content_width: f32, base_content_height: f32) -> (f32, f32) {
+    (
+        MIN_CONTENT_WIDTH.max(base_content_width * MIN_PIN_SCALE),
+        MIN_CONTENT_HEIGHT.max(base_content_height * MIN_PIN_SCALE),
+    )
+}
+
 #[derive(Clone, Copy)]
 struct PinMetrics {
     close_size: u32,
@@ -846,8 +856,10 @@ fn resize_from_corner(
     let vertical_delta = (pointer.y - start_pointer.y) as f32 * vertical_sign;
     let projected_scale =
         proportional_scale_from_delta(horizontal_delta, vertical_delta, start_width, start_height);
-    let min_scale = (MIN_CONTENT_WIDTH / start_width)
-        .max(MIN_CONTENT_HEIGHT / start_height)
+    let (minimum_content_width, minimum_content_height) =
+        minimum_content_size(base_content_width, base_content_height);
+    let min_scale = (minimum_content_width / start_width)
+        .max(minimum_content_height / start_height)
         .min(1.0);
     let max_scale = (MAX_CONTENT_WIDTH / start_width)
         .min(MAX_CONTENT_HEIGHT / start_height)
@@ -1144,7 +1156,7 @@ fn write_bgra_pixel(pixels: &mut [u8], width: u32, x: u32, y: u32, rgba: [u8; 4]
 mod tests {
     use super::{
         PinCompositor, PinFrame, ResizeCorner, ScreenRect, destroy_pin_window, hide_pin_window,
-        high_word_signed, resize_from_corner, rgba_to_premultiplied_bgra,
+        high_word_signed, minimum_content_size, resize_from_corner, rgba_to_premultiplied_bgra,
         shadow_extent_for_content,
     };
     use windows::Win32::Foundation::{POINT, RECT};
@@ -1202,6 +1214,13 @@ mod tests {
             shadow_extent_for_content(1_280.0, 720.0, 320.0, 180.0),
             40.0
         );
+    }
+
+    #[test]
+    fn minimum_pin_size_keeps_thirty_percent_of_the_initial_display() {
+        assert_eq!(minimum_content_size(960.0, 540.0), (288.0, 162.0));
+        assert_eq!(minimum_content_size(320.0, 180.0), (96.0, 64.0));
+        assert_eq!(minimum_content_size(128.0, 64.0), (96.0, 64.0));
     }
 
     #[test]

@@ -138,6 +138,48 @@ impl ResizeCorner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+impl ResizeEdge {
+    fn from_mode(mode: i32) -> Option<Self> {
+        match mode {
+            5 => Some(Self::Top),
+            6 => Some(Self::Right),
+            7 => Some(Self::Bottom),
+            8 => Some(Self::Left),
+            _ => None,
+        }
+    }
+
+    fn point(self, rect: FloatRect) -> FloatPoint {
+        let center = rect.center();
+        match self {
+            Self::Top => FloatPoint {
+                x: center.x,
+                y: rect.top,
+            },
+            Self::Right => FloatPoint {
+                x: rect.right,
+                y: center.y,
+            },
+            Self::Bottom => FloatPoint {
+                x: center.x,
+                y: rect.bottom,
+            },
+            Self::Left => FloatPoint {
+                x: rect.left,
+                y: center.y,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResizeLimits {
     bounds: Option<FloatRect>,
@@ -887,27 +929,45 @@ fn transform_selection(
         ));
     }
 
-    let corner = ResizeCorner::from_mode(mode)?;
-    let start_corner = corner.point(start);
-    let effective_pointer = FloatPoint {
-        x: start_corner.x + pointer.x - start_pointer.x,
-        y: start_corner.y + pointer.y - start_pointer.y,
-    };
     let aspect = start.width() / start.height();
-    Some(resize_rect_from_pointer(
+    let limits = ResizeLimits {
+        bounds: Some(bounds),
+        min_width: 6.0,
+        min_height: 6.0,
+        max_width: bounds.width(),
+        max_height: bounds.height(),
+    };
+    if let Some(corner) = ResizeCorner::from_mode(mode) {
+        let start_corner = corner.point(start);
+        let effective_pointer = FloatPoint {
+            x: start_corner.x + pointer.x - start_pointer.x,
+            y: start_corner.y + pointer.y - start_pointer.y,
+        };
+        return Some(resize_rect_from_pointer(
+            start,
+            effective_pointer,
+            corner,
+            preserve_aspect,
+            centered,
+            aspect,
+            limits,
+        ));
+    }
+
+    let edge = ResizeEdge::from_mode(mode)?;
+    let start_edge = edge.point(start);
+    let effective_pointer = FloatPoint {
+        x: start_edge.x + pointer.x - start_pointer.x,
+        y: start_edge.y + pointer.y - start_pointer.y,
+    };
+    Some(resize_rect_from_edge(
         start,
         effective_pointer,
-        corner,
+        edge,
         preserve_aspect,
         centered,
         aspect,
-        ResizeLimits {
-            bounds: Some(bounds),
-            min_width: 6.0,
-            min_height: 6.0,
-            max_width: bounds.width(),
-            max_height: bounds.height(),
-        },
+        limits,
     ))
 }
 
@@ -1040,6 +1100,145 @@ fn resize_rect_from_pointer(
             top,
             right,
             bottom,
+        }
+    }
+}
+
+fn resize_rect_from_edge(
+    start: FloatRect,
+    pointer: FloatPoint,
+    edge: ResizeEdge,
+    preserve_aspect: bool,
+    centered: bool,
+    aspect: f32,
+    limits: ResizeLimits,
+) -> FloatRect {
+    let center = start.center();
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        start.width() / start.height()
+    };
+    let bounds = limits.bounds;
+    let centered_available_width = bounds.map_or(limits.max_width, |bounds| {
+        ((center.x - bounds.left).min(bounds.right - center.x) * 2.0).max(1.0)
+    });
+    let centered_available_height = bounds.map_or(limits.max_height, |bounds| {
+        ((center.y - bounds.top).min(bounds.bottom - center.y) * 2.0).max(1.0)
+    });
+
+    match edge {
+        ResizeEdge::Left | ResizeEdge::Right => {
+            let sign = if edge == ResizeEdge::Right { 1.0 } else { -1.0 };
+            let fixed_x = if centered {
+                center.x
+            } else if sign > 0.0 {
+                start.left
+            } else {
+                start.right
+            };
+            let raw_width = sign * (pointer.x - fixed_x) * if centered { 2.0 } else { 1.0 };
+            let primary_available = bounds.map_or(limits.max_width, |bounds| {
+                if centered {
+                    centered_available_width
+                } else if sign > 0.0 {
+                    bounds.right - fixed_x
+                } else {
+                    fixed_x - bounds.left
+                }
+                .max(1.0)
+            });
+            let mut max_width = limits.max_width.min(primary_available).max(1.0);
+            let mut min_width = limits.min_width;
+            if preserve_aspect {
+                max_width = max_width
+                    .min(limits.max_height * aspect)
+                    .min(centered_available_height * aspect);
+                min_width = min_width.max(limits.min_height * aspect);
+            }
+            let min_width = min_width.min(max_width).max(1.0);
+            let width = raw_width.clamp(min_width, max_width);
+            let height = if preserve_aspect {
+                width / aspect
+            } else {
+                start.height()
+            };
+            let (left, right) = if centered {
+                (center.x - width / 2.0, center.x + width / 2.0)
+            } else if sign > 0.0 {
+                (fixed_x, fixed_x + width)
+            } else {
+                (fixed_x - width, fixed_x)
+            };
+            let (top, bottom) = if preserve_aspect {
+                (center.y - height / 2.0, center.y + height / 2.0)
+            } else {
+                (start.top, start.bottom)
+            };
+            FloatRect {
+                left,
+                top,
+                right,
+                bottom,
+            }
+        }
+        ResizeEdge::Top | ResizeEdge::Bottom => {
+            let sign = if edge == ResizeEdge::Bottom {
+                1.0
+            } else {
+                -1.0
+            };
+            let fixed_y = if centered {
+                center.y
+            } else if sign > 0.0 {
+                start.top
+            } else {
+                start.bottom
+            };
+            let raw_height = sign * (pointer.y - fixed_y) * if centered { 2.0 } else { 1.0 };
+            let primary_available = bounds.map_or(limits.max_height, |bounds| {
+                if centered {
+                    centered_available_height
+                } else if sign > 0.0 {
+                    bounds.bottom - fixed_y
+                } else {
+                    fixed_y - bounds.top
+                }
+                .max(1.0)
+            });
+            let mut max_height = limits.max_height.min(primary_available).max(1.0);
+            let mut min_height = limits.min_height;
+            if preserve_aspect {
+                max_height = max_height
+                    .min(limits.max_width / aspect)
+                    .min(centered_available_width / aspect);
+                min_height = min_height.max(limits.min_width / aspect);
+            }
+            let min_height = min_height.min(max_height).max(1.0);
+            let height = raw_height.clamp(min_height, max_height);
+            let width = if preserve_aspect {
+                height * aspect
+            } else {
+                start.width()
+            };
+            let (top, bottom) = if centered {
+                (center.y - height / 2.0, center.y + height / 2.0)
+            } else if sign > 0.0 {
+                (fixed_y, fixed_y + height)
+            } else {
+                (fixed_y - height, fixed_y)
+            };
+            let (left, right) = if preserve_aspect {
+                (center.x - width / 2.0, center.x + width / 2.0)
+            } else {
+                (start.left, start.right)
+            };
+            FloatRect {
+                left,
+                top,
+                right,
+                bottom,
+            }
         }
     }
 }
@@ -1358,6 +1557,142 @@ mod tests {
                 top: 10.0,
                 right: 80.0,
                 bottom: 60.0,
+            },
+        );
+    }
+
+    #[test]
+    fn selection_right_edge_resize_ignores_perpendicular_pointer_motion() {
+        let resized = transform_selection(
+            6,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 50.0,
+                bottom: 30.0,
+            },
+            FloatPoint { x: 50.0, y: 20.0 },
+            FloatPoint { x: 80.0, y: 140.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 10.0,
+                top: 10.0,
+                right: 80.0,
+                bottom: 30.0,
+            },
+        );
+    }
+
+    #[test]
+    fn control_resizes_top_edge_around_the_center() {
+        let resized = transform_selection(
+            5,
+            FloatRect {
+                left: 80.0,
+                top: 80.0,
+                right: 120.0,
+                bottom: 100.0,
+            },
+            FloatPoint { x: 100.0, y: 80.0 },
+            FloatPoint { x: 180.0, y: 70.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 80.0,
+                top: 70.0,
+                right: 120.0,
+                bottom: 110.0,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_resizes_bottom_edge_with_original_aspect() {
+        let resized = transform_selection(
+            7,
+            FloatRect {
+                left: 80.0,
+                top: 80.0,
+                right: 120.0,
+                bottom: 100.0,
+            },
+            FloatPoint { x: 100.0, y: 100.0 },
+            FloatPoint { x: 170.0, y: 120.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 60.0,
+                top: 80.0,
+                right: 140.0,
+                bottom: 120.0,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_and_control_resize_left_edge_with_aspect_and_center() {
+        let resized = transform_selection(
+            8,
+            FloatRect {
+                left: 80.0,
+                top: 80.0,
+                right: 120.0,
+                bottom: 100.0,
+            },
+            FloatPoint { x: 80.0, y: 90.0 },
+            FloatPoint { x: 60.0, y: 150.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_rect(
+            resized,
+            FloatRect {
+                left: 60.0,
+                top: 70.0,
+                right: 140.0,
+                bottom: 110.0,
             },
         );
     }

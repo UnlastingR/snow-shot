@@ -19,7 +19,9 @@ export component CaptureWindow inherits Window {
     title: "Snow Shot 区域截图";
     no-frame: true;
     always-on-top: true;
-    background: transparent;
+    // The frozen frame covers the full client area. Keeping this window opaque avoids the
+    // Windows layered-window path, whose partial redraws can leave black damage artifacts.
+    background: black;
 
     public function prepare-selection() {
         overlay.reset-selection();
