@@ -4,9 +4,16 @@
 
 - 保留现有 Rust 截图、窗口、剪贴板、全局快捷键与图像处理核心。
 - 移除 Tauri WebView、React、Ant Design、Excalidraw 与 AI/翻译等非核心功能。
-- 默认空闲常驻内存目标：Windows 25–45 MB；macOS/Linux 30–60 MB。
+- 默认空闲常驻内存目标：Windows 11 amd64 为 25–45 MB；macOS arm64 为 30–60 MB。
 - 截图编辑时目标：不含 OCR 模型时低于 100 MB。
-- OCR 按需加载，用完释放；主程序不捆绑大模型。
+- 沿用现有本地 OCR 实现，按需加载并在空闲后释放。
+
+## 平台范围
+
+- 第一开发与发布平台：Windows 11 amd64（`x86_64-pc-windows-msvc`）。
+- 第二适配平台：macOS arm64（`aarch64-apple-darwin`）。
+- 暂不适配 Linux、Windows arm64 和 macOS x86_64，也不将这些平台纳入当前发布验收。
+- 核心接口继续隔离平台实现，但当前阶段不为范围外平台投入开发和测试资源。
 
 ## 功能范围
 
@@ -48,7 +55,7 @@ crates/
   snowshot-capture/    # xcap/scap 与各平台截图实现
   snowshot-platform/   # 快捷键、托盘、窗口、剪贴板
   snowshot-canvas/     # 标注模型、撤销栈、wgpu 渲染
-  snowshot-ocr/        # OCR provider trait 与调度
+  snowshot-ocr/        # 现有 OcrService 与 ONNX Runtime 路径
   snowshot-storage/    # 配置、历史记录、模型清单
 apps/
   snowshot-native/     # Slint 桌面应用
@@ -56,36 +63,16 @@ apps/
 
 核心 crate 不允许依赖 Tauri、WebView 或 JavaScript 运行时。
 
-## OCR 架构
+## OCR 路线
 
-定义统一 Provider：
+不新增 OCR Provider 抽象，不接入 PaddleOCR-VL、本地 Python/Docker 服务或远程 OCR API。沿用当前实现：
 
-```rust
-pub trait OcrProvider: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn is_available(&self) -> bool;
-    async fn recognize(&self, image: OcrImage) -> Result<OcrResult, OcrError>;
-    async fn unload(&self) -> Result<(), OcrError> { Ok(()) }
-}
-```
-
-### 默认：轻量本地 OCR
-
-- 保留当前 ONNX Runtime 路线。
-- 升级到 PP-OCRv5 mobile 或兼容的轻量 ONNX 模型。
-- 模型不常驻内存；首次 OCR 时加载，空闲后自动释放。
-- 安装包可不包含模型，首次使用时让用户选择下载。
-
-### 可选：PaddleOCR-VL
-
-用户口中的“百度 ultimate OCR”应为百度飞桨的 **PaddleOCR-VL**。它是 0.9B 级视觉语言模型，适合复杂文档、公式、表格和版面解析，不适合直接嵌入几十 MB 常驻的小工具。
-
-提供两种可选接入：
-
-1. 远程 API：用户填写服务地址、模型名和密钥。
-2. 本地服务：应用检测本机 Docker/Python 服务，并连接 `http://127.0.0.1:<port>`；安装、下载和运行均需用户主动确认。
-
-主程序只包含 HTTP 客户端和服务管理元数据，不捆绑 Paddle/Python/大模型。
+- 复用 `src-tauri/src-crates/app-services/src/ocr_service.rs` 中的 `OcrService`。
+- 保留 `paddle-ocr-rs`、ONNX Runtime 和现有 PP-OCRv4 检测/识别模型及方向分类模型。
+- 保留初始化、识别、释放、自定义模型文件、热启动和模型写入内存等现有能力。
+- 抽离 Rust Core 时只移除 Tauri command 包装层，OCR 行为、模型格式和结果结构保持兼容。
+- 将现有 OCR 模型目录和配置迁移到 Native Lite，不保留通用插件系统。
+- 默认不预热模型；首次使用时加载，空闲 60–120 秒后释放会话。
 
 ## 内存策略
 
@@ -102,7 +89,8 @@ pub trait OcrProvider: Send + Sync {
 ### Phase 0：基线测量
 
 - 记录当前空闲、主窗口、截图、编辑、OCR 峰值内存。
-- 用 Windows Performance Recorder/Process Explorer、macOS Instruments、Linux heaptrack 建立基线。
+- Windows 11 amd64 使用 Windows Performance Recorder/Process Explorer 建立主基线。
+- macOS arm64 使用 Instruments 建立第二平台基线。
 
 ### Phase 1：抽离 Rust Core
 
@@ -115,7 +103,7 @@ pub trait OcrProvider: Send + Sync {
 - Slint 主窗口、托盘和快捷键。
 - 区域/窗口/全屏截图。
 - 保存、复制、贴图。
-- 轻量 OCR。
+- 接入现有 `OcrService` 本地 OCR。
 
 ### Phase 3：原生标注画布
 
@@ -123,16 +111,11 @@ pub trait OcrProvider: Send + Sync {
 - 矩形、箭头、画笔、文字、马赛克。
 - 撤销/重做与高 DPI 多显示器适配。
 
-### Phase 4：可选 PaddleOCR-VL
-
-- Provider 配置页面。
-- 远程 API 接入。
-- 可选本地服务安装向导和健康检查。
-
-### Phase 5：优化与发布
+### Phase 4：优化与发布
 
 - 删除 Tauri、React、Excalidraw 与插件系统。
-- 三平台内存回归测试。
+- 完成 Windows 11 amd64 主平台回归测试。
+- 完成 macOS arm64 第二平台适配与回归测试。
 - 发布 native-lite 预览版。
 
 ## 验收标准
@@ -142,4 +125,5 @@ pub trait OcrProvider: Send + Sync {
 - 默认安装不下载任何大模型。
 - 不启用 OCR 时，空闲常驻内存稳定在目标范围内。
 - OCR 释放后，工作集能显著回落。
-- Windows/macOS/Linux 均能完成截图、标注、复制和保存闭环。
+- Windows 11 amd64 完成截图、标注、OCR、复制和保存闭环。
+- macOS arm64 完成同等功能闭环，且不存在 Rosetta 运行依赖。

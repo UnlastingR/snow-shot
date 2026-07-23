@@ -149,18 +149,10 @@ export component AppWindow inherits Window {
                             Rectangle { height: 1px; background: SnowTheme.border; }
 
                             SnowSettingsActionRow {
-                                title: "轻量本地 OCR";
-                                description: "默认不随程序加载；首次使用时下载，空闲后自动释放模型会话。";
+                                title: "现有本地 OCR";
+                                description: "沿用当前 OcrService、ONNX Runtime 与 PP-OCRv4 模型路径，空闲后释放模型会话。";
                                 action-label: "配置";
                                 primary: true;
-                            }
-
-                            Rectangle { height: 1px; background: SnowTheme.border; }
-
-                            SnowSettingsActionRow {
-                                title: "PaddleOCR-VL";
-                                description: "通过用户自建的本地或远程服务提供复杂文档识别，不打包到主程序。";
-                                action-label: "未安装";
                             }
                         }
 
