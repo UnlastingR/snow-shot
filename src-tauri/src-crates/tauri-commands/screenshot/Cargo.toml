@@ -13,6 +13,7 @@ log = { workspace = true }
 rayon = { workspace = true }
 
 snow-shot-app-shared = { workspace = true }
+snow-shot-capture = { workspace = true }
 snow-shot-app-os = { workspace = true }
 snow-shot-app-utils = { workspace = true }
 snow-shot-webview = { workspace = true }

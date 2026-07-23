@@ -1,7 +1,8 @@
 use image::DynamicImage;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Serialize;
 use snow_shot_app_os::ui_automation::UIElements;
+use snow_shot_capture::{ImageEncoder, PixelRect, crop_rgb_image, encode_image};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
@@ -37,14 +38,15 @@ pub async fn capture_current_monitor(
         }
     };
 
-    let image_buffer = snow_shot_app_utils::encode_image(
+    let image_buffer = encode_image(
         &image_buffer,
         match encoder.as_str() {
-            "webp" => snow_shot_app_utils::ImageEncoder::Webp,
-            "png" => snow_shot_app_utils::ImageEncoder::Png,
-            _ => snow_shot_app_utils::ImageEncoder::Webp,
+            "webp" => ImageEncoder::Webp,
+            "png" => ImageEncoder::Png,
+            _ => ImageEncoder::Webp,
         },
-    );
+    )
+    .map_err(|error| format!("[capture_current_monitor] {error}"))?;
 
     Ok(Response::new(image_buffer))
 }
@@ -79,8 +81,8 @@ pub async fn capture_all_monitors(
         )
         .await?;
 
-        let image_buffer =
-            snow_shot_app_utils::encode_image(&image, snow_shot_app_utils::ImageEncoder::Png);
+        let image_buffer = encode_image(&image, ImageEncoder::Png)
+            .map_err(|error| format!("[capture_all_monitors] {error}"))?;
 
         Ok(Response::new(image_buffer))
     }
@@ -131,8 +133,8 @@ pub async fn capture_all_monitors(
             // 通过 SharedBuffer 传输的特殊标记
             Ok(Response::new(vec![1]))
         } else {
-            let image_buffer =
-                snow_shot_app_utils::encode_image(&image, snow_shot_app_utils::ImageEncoder::Png);
+            let image_buffer = encode_image(&image, ImageEncoder::Png)
+                .map_err(|error| format!("[capture_all_monitors] {error}"))?;
 
             Ok(Response::new(image_buffer))
         }
@@ -289,7 +291,8 @@ pub async fn capture_focused_window(
     }
 
     // 编码图像为 PNG 格式并返回
-    let image_buffer = snow_shot_app_utils::encode_image(&image, snow_shot_app_utils::ImageEncoder::Png);
+    let image_buffer = encode_image(&image, ImageEncoder::Png)
+        .map_err(|error| format!("[capture_focused_window] {error}"))?;
 
     Ok(Response::new(image_buffer))
 }
@@ -693,57 +696,19 @@ pub async fn capture_full_screen(
         max_y: active_monitor_rect.max_y - all_monitors_bounding_box.min_y,
     };
 
-    let active_monitor_crop_region_x = active_monitor_crop_region.min_x as usize;
-    let active_monitor_crop_region_y = active_monitor_crop_region.min_y as usize;
-    let active_monitor_crop_region_width =
-        (active_monitor_crop_region.max_x - active_monitor_crop_region.min_x) as usize;
-    let active_monitor_crop_region_height =
-        (active_monitor_crop_region.max_y - active_monitor_crop_region.min_y) as usize;
-
-    let mut active_monitor_image_bytes = unsafe {
-        let mut bytes = Vec::with_capacity(
-            active_monitor_crop_region_width * active_monitor_crop_region_height * 3,
-        );
-        bytes.set_len(active_monitor_crop_region_width * active_monitor_crop_region_height * 3);
-        bytes
-    };
-
-    let all_monitor_image_width = all_monitors_image.width() as usize;
-    let base_index =
-        (active_monitor_crop_region_y * all_monitor_image_width + active_monitor_crop_region_x) * 3;
-
-    let active_monitor_image_bytes_ptr = active_monitor_image_bytes.as_mut_ptr() as usize;
-    let all_monitor_image_bytes_ptr = all_monitors_image.as_bytes().as_ptr() as usize;
-    (0..active_monitor_crop_region_height)
-        .into_par_iter()
-        .for_each(|y| unsafe {
-            let active_monitor_image_row_ptr = (active_monitor_image_bytes_ptr as *mut u8)
-                .add(y * active_monitor_crop_region_width * 3);
-            let all_monitor_image_row_ptr = (all_monitor_image_bytes_ptr as *mut u8)
-                .add(base_index + y * all_monitor_image_width * 3);
-
-            std::ptr::copy_nonoverlapping(
-                all_monitor_image_row_ptr,
-                active_monitor_image_row_ptr,
-                active_monitor_crop_region_width * 3,
-            );
-        });
-
-    let active_monitor_image = match image::RgbImage::from_raw(
-        active_monitor_crop_region_width as u32,
-        active_monitor_crop_region_height as u32,
-        active_monitor_image_bytes,
-    ) {
-        Some(image) => image::DynamicImage::ImageRgb8(image),
-        None => {
-            return Err(String::from(
-                "[capture_full_screen] failed to create active monitor image",
-            ));
-        }
-    };
+    let crop_region = PixelRect::from_bounds(
+        active_monitor_crop_region.min_x,
+        active_monitor_crop_region.min_y,
+        active_monitor_crop_region.max_x,
+        active_monitor_crop_region.max_y,
+    )
+    .map_err(|error| format!("[capture_full_screen] {error}"))?;
+    let active_monitor_image = crop_rgb_image(&all_monitors_image, crop_region)
+        .map_err(|error| format!("[capture_full_screen] {error}"))?;
 
     // 编码图像为 PNG 格式
-    let image_buffer = snow_shot_app_utils::encode_image(&active_monitor_image, snow_shot_app_utils::ImageEncoder::Png);
+    let image_buffer = encode_image(&active_monitor_image, ImageEncoder::Png)
+        .map_err(|error| format!("[capture_full_screen] {error}"))?;
 
     // 写入到截图历史
     let capture_history_file_path = PathBuf::from(capture_history_file_path);

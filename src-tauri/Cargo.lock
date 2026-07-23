@@ -6851,6 +6851,7 @@ dependencies = [
  "scap",
  "serde",
  "snow-shot-app-shared",
+ "snow-shot-capture",
  "snow-shot-webview",
  "tauri",
  "tokio",
@@ -6862,6 +6863,14 @@ dependencies = [
  "xcap",
  "zune-core",
  "zune-jpegxl",
+]
+
+[[package]]
+name = "snow-shot-capture"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "rayon",
 ]
 
 [[package]]
@@ -6986,6 +6995,7 @@ dependencies = [
  "snow-shot-app-os",
  "snow-shot-app-shared",
  "snow-shot-app-utils",
+ "snow-shot-capture",
  "snow-shot-global-state",
  "snow-shot-webview",
  "tauri",

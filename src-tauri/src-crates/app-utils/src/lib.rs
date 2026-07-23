@@ -6,10 +6,6 @@ use tokio::fs;
 
 use base64::prelude::*;
 use device_query::{DeviceQuery, DeviceState, MouseState};
-use image::codecs::avif::AvifEncoder;
-use image::codecs::jpeg::JpegEncoder;
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::codecs::webp::WebPEncoder;
 use image::{DynamicImage, GenericImageView};
 use snow_shot_app_shared::ElementRect;
 use tauri::AppHandle;
@@ -27,6 +23,10 @@ pub mod monitor_hdr_info;
 pub mod windows_capture_image;
 
 pub mod monitor_info;
+
+#[cfg(target_os = "macos")]
+pub use snow_shot_capture::{bgra_to_rgb, bgra_to_rgba};
+pub use snow_shot_capture::ImageEncoder;
 
 pub fn get_device_state() -> Result<DeviceState, String> {
     #[cfg(target_os = "macos")]
@@ -493,94 +493,8 @@ pub fn capture_target_monitor(
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn bgra_to_rgb(bgra_data: &[u8]) -> Vec<u8> {
-    let pixel_count = bgra_data.len() / 4;
-    let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-
-    unsafe {
-        rgb_data.set_len(pixel_count * 3);
-
-        let bgra_ptr_address = bgra_data.as_ptr() as usize;
-        let rgb_ptr_address = rgb_data.as_mut_ptr() as usize;
-
-        (0..pixel_count).into_par_iter().for_each(|i| {
-            let rgb_ptr = (rgb_ptr_address as *mut u8).add(i * 3);
-            let bgra_ptr = (bgra_ptr_address as *const u8).add(i * 4);
-
-            rgb_ptr.write(*bgra_ptr.add(2)); // R
-            rgb_ptr.add(1).write(*bgra_ptr.add(1)); // G
-            rgb_ptr.add(2).write(*bgra_ptr.add(0)); // B
-        });
-    }
-
-    rgb_data
-}
-
-#[cfg(target_os = "macos")]
-pub fn bgra_to_rgba(bgra_data: &[u8]) -> Vec<u8> {
-    let pixel_count = bgra_data.len() / 4;
-    let mut rgba_data = Vec::with_capacity(pixel_count * 4);
-
-    unsafe {
-        rgba_data.set_len(pixel_count * 4);
-
-        let bgra_ptr_address = bgra_data.as_ptr() as usize;
-        let rgba_ptr_address = rgba_data.as_mut_ptr() as usize;
-
-        (0..pixel_count).into_par_iter().for_each(|i| {
-            let rgba_ptr = (rgba_ptr_address as *mut u8).add(i * 4);
-            let bgra_ptr = (bgra_ptr_address as *const u8).add(i * 4);
-
-            rgba_ptr.write(*bgra_ptr.add(2)); // R
-            rgba_ptr.add(1).write(*bgra_ptr.add(1)); // G
-            rgba_ptr.add(2).write(*bgra_ptr.add(0)); // B
-            rgba_ptr.add(3).write(*bgra_ptr.add(3)); // A
-        });
-    }
-
-    rgba_data
-}
-
-pub enum ImageEncoder {
-    Webp,
-    Png,
-    Avif,
-    Jpeg,
-}
-
 pub fn encode_image(image: &image::DynamicImage, encoder: ImageEncoder) -> Vec<u8> {
-    // 编码为指定格式
-    let mut buf = Vec::with_capacity(image.as_bytes().len() / 8);
-
-    match encoder {
-        ImageEncoder::Jpeg => {
-            image
-                .write_with_encoder(JpegEncoder::new_with_quality(&mut buf, 80))
-                .unwrap();
-        }
-        ImageEncoder::Webp => {
-            image
-                .write_with_encoder(WebPEncoder::new_lossless(&mut buf))
-                .unwrap();
-        }
-        ImageEncoder::Png => {
-            image
-                .write_with_encoder(PngEncoder::new_with_quality(
-                    &mut buf,
-                    CompressionType::Fast,
-                    FilterType::Paeth,
-                ))
-                .unwrap();
-        }
-        ImageEncoder::Avif => {
-            image
-                .write_with_encoder(AvifEncoder::new_with_speed_quality(&mut buf, 10, 80))
-                .unwrap();
-        }
-    }
-
-    return buf;
+    snow_shot_capture::encode_image(image, encoder).expect("[encode_image] Failed to encode image")
 }
 
 /// 将一个图像绘制到另一个图像上

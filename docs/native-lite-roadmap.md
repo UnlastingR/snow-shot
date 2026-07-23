@@ -102,7 +102,10 @@ apps/
 
 - 已将现有 `OcrService`、图像预处理和识别结果类型抽离到独立的 `crates/snowshot-ocr`。
 - 旧 `snow-shot-app-services::ocr_service` 路径继续兼容，Tauri OCR command 仅保留 IPC 适配。
-- 已覆盖默认/自定义模型路径及 RGBA 转换单测；下一步抽离截图服务。
+- 已覆盖默认/自定义模型路径及 RGBA 转换单测。
+- 已新增 `crates/snowshot-capture`，承载图像编码、像素区域裁剪和 BGRA 颜色转换。
+- 旧 Tauri 截图 command 已复用新 Core，全屏截图不再使用手写裸指针裁剪。
+- 下一步抽离 Windows 11 amd64 平台采集 backend，再实现 macOS arm64 backend。
 
 ### Phase 2：Native Lite MVP
 
