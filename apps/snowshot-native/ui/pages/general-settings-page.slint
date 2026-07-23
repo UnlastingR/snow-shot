@@ -58,7 +58,7 @@ export component GeneralSettingsPage inherits Rectangle {
 
                     SnowSettingsActionRow {
                         title: "区域截图";
-                        description: "使用 Alt+F12 冻结鼠标所在显示器，拖动框选；Enter 复制，Esc 取消。";
+                        description: "使用 Alt+F12 冻结鼠标所在显示器，框选后可复制、保存或贴图；Esc 取消。";
                         action-label: "开始截图";
                         primary: true;
                         action-clicked => { root.capture-clicked(); }

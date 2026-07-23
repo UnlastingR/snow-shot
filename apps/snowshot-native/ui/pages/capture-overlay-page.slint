@@ -4,6 +4,8 @@ import { CaptureToolbar } from "../components/capture-toolbar.slint";
 export component CaptureOverlayPage inherits Rectangle {
     in property <image> frozen-frame;
     callback selection-confirmed(float, float, float, float);
+    callback selection-save-requested(float, float, float, float);
+    callback selection-pin-requested(float, float, float, float);
     callback cancelled();
 
     private property <length> anchor-x: 0px;
@@ -20,7 +22,7 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> selection-height: root.selection-bottom - root.selection-top;
     private property <bool> selection-visible: root.selecting || root.has-selection;
 
-    background: black;
+    background: transparent;
     forward-focus: keyboard-focus;
 
     function update-cursor(x: length, y: length) {
@@ -39,6 +41,28 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    function save-current-selection() {
+        if (root.has-selection && root.width > 0px && root.height > 0px) {
+            root.selection-save-requested(
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        }
+    }
+
+    function pin-current-selection() {
+        if (root.has-selection && root.width > 0px && root.height > 0px) {
+            root.selection-pin-requested(
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        }
+    }
+
     public function reset-selection() {
         root.anchor-x = 0px;
         root.anchor-y = 0px;
@@ -46,6 +70,10 @@ export component CaptureOverlayPage inherits Rectangle {
         root.cursor-y = 0px;
         root.selecting = false;
         root.has-selection = false;
+        keyboard-focus.focus();
+    }
+
+    public function focus-selection() {
         keyboard-focus.focus();
     }
 
@@ -144,7 +172,7 @@ export component CaptureOverlayPage inherits Rectangle {
 
         Text {
             text: root.has-selection
-                ? "拖动可重新框选 · Enter 复制 · Esc 取消"
+                ? "重新框选 · Enter 复制 · 工具栏可保存或贴图"
                 : "拖动鼠标框选区域 · Esc 取消";
             color: white;
             font-size: SnowTheme.body-size;
@@ -162,6 +190,8 @@ export component CaptureOverlayPage inherits Rectangle {
             ? root.selection-bottom + SnowTheme.space-3
             : max(SnowTheme.space-3, root.selection-top - self.height - SnowTheme.space-3);
         confirm-clicked => { root.confirm-current-selection(); }
+        save-clicked => { root.save-current-selection(); }
+        pin-clicked => { root.pin-current-selection(); }
         cancel-clicked => { root.cancelled(); }
     }
 

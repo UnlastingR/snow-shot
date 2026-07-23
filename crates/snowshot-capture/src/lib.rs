@@ -157,6 +157,32 @@ pub fn encode_image(image: &DynamicImage, encoder: ImageEncoder) -> Result<Vec<u
     Ok(buffer)
 }
 
+pub fn encode_rgba_pixels(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    encoder: ImageEncoder,
+) -> Result<Vec<u8>, CaptureError> {
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(CaptureError::InvalidRegion)?;
+
+    if pixels.len() != expected_len {
+        return Err(CaptureError::Backend(format!(
+            "RGBA buffer length {} does not match {width}x{height} image",
+            pixels.len()
+        )));
+    }
+
+    let image = image::RgbaImage::from_raw(width, height, pixels.to_vec())
+        .map(DynamicImage::ImageRgba8)
+        .ok_or_else(|| CaptureError::Backend("failed to create RGBA8 image".to_string()))?;
+
+    encode_image(&image, encoder)
+}
+
 pub fn crop_rgb_image(
     image: &DynamicImage,
     region: PixelRect,
@@ -384,6 +410,24 @@ mod tests {
             image::load_from_memory_with_format(&encoded, image::ImageFormat::Png).unwrap();
 
         assert_eq!(decoded.dimensions(), (3, 2));
+    }
+
+    #[test]
+    fn encodes_rgba_pixels_as_png() {
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 128];
+        let encoded = encode_rgba_pixels(&pixels, 2, 1, ImageEncoder::Png).unwrap();
+        let decoded =
+            image::load_from_memory_with_format(&encoded, image::ImageFormat::Png).unwrap();
+
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.to_rgba8().as_raw(), &pixels);
+    }
+
+    #[test]
+    fn rejects_rgba_encoding_with_wrong_buffer_length() {
+        let error = encode_rgba_pixels(&[0; 7], 2, 1, ImageEncoder::Png).unwrap_err();
+
+        assert!(error.to_string().contains("does not match 2x1 image"));
     }
 
     #[test]

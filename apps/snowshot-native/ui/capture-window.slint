@@ -3,21 +3,33 @@ import { CaptureOverlayPage } from "pages/capture-overlay-page.slint";
 export component CaptureWindow inherits Window {
     in-out property <image> frozen-frame;
     callback selection-confirmed(float, float, float, float);
+    callback selection-save-requested(float, float, float, float);
+    callback selection-pin-requested(float, float, float, float);
     callback cancelled();
 
     title: "Snow Shot 区域截图";
     no-frame: true;
     always-on-top: true;
-    background: black;
+    background: transparent;
 
     public function prepare-selection() {
         overlay.reset-selection();
+    }
+
+    public function focus-selection() {
+        overlay.focus-selection();
     }
 
     overlay := CaptureOverlayPage {
         frozen-frame: root.frozen-frame;
         selection-confirmed(left, top, right, bottom) => {
             root.selection-confirmed(left, top, right, bottom);
+        }
+        selection-save-requested(left, top, right, bottom) => {
+            root.selection-save-requested(left, top, right, bottom);
+        }
+        selection-pin-requested(left, top, right, bottom) => {
+            root.selection-pin-requested(left, top, right, bottom);
         }
         cancelled => { root.cancelled(); }
     }

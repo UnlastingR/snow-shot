@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -12,10 +11,11 @@ use slint::{
 use snow_shot_capture::PixelRect;
 
 use crate::capture_workflow::{
-    CaptureWorkflowError, FrozenMonitorFrame, capture_monitor_to_clipboard,
-    copy_frozen_region_to_clipboard, freeze_monitor_under_cursor,
+    CaptureWorkflowError, FrozenMonitorFrame, FrozenRegionFrame, capture_monitor_to_clipboard,
+    copy_frozen_region_to_clipboard, extract_frozen_region, freeze_monitor_under_cursor,
+    save_frozen_region_to_path,
 };
-use crate::{AppTray, AppWindow, CaptureWindow};
+use crate::{AppTray, AppWindow, CaptureWindow, PinWindow};
 
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 type SharedFrame = Arc<Mutex<Option<FrozenMonitorFrame>>>;
@@ -36,14 +36,20 @@ pub struct WindowsRuntime {
 }
 
 impl WindowsRuntime {
-    pub fn start(app: &AppWindow, tray: &AppTray, capture: &CaptureWindow) -> Self {
+    pub fn start(
+        app: &AppWindow,
+        tray: &AppTray,
+        capture: &CaptureWindow,
+        pin: &PinWindow,
+    ) -> Self {
         app.window()
             .on_close_requested(|| CloseRequestResponse::HideWindow);
 
         let busy = Arc::new(AtomicBool::new(false));
         let frame = Arc::new(Mutex::new(None));
 
-        bind_capture_callbacks(app, capture, Arc::clone(&busy), Arc::clone(&frame));
+        bind_pin_callbacks(pin);
+        bind_capture_callbacks(app, capture, pin, Arc::clone(&busy), Arc::clone(&frame));
         bind_app_callbacks(app, capture, Arc::clone(&busy), Arc::clone(&frame));
         bind_tray_callbacks(app, tray, capture, Arc::clone(&busy), Arc::clone(&frame));
 
@@ -92,7 +98,7 @@ fn register_screenshot_hotkey(
         }
     }));
     app.set_runtime_status(
-        format!("{SCREENSHOT_SHORTCUT} 已启用：拖动框选，Enter 复制，Esc 取消。").into(),
+        format!("{SCREENSHOT_SHORTCUT} 已启用：拖动框选，可复制、保存或贴图；Esc 取消。").into(),
     );
 
     Some(HotkeyRegistration { manager, hotkey })
@@ -101,6 +107,7 @@ fn register_screenshot_hotkey(
 fn bind_capture_callbacks(
     app: &AppWindow,
     capture: &CaptureWindow,
+    pin: &PinWindow,
     busy: Arc<AtomicBool>,
     frame: SharedFrame,
 ) {
@@ -139,6 +146,124 @@ fn bind_capture_callbacks(
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
+    let save_busy = Arc::clone(&busy);
+    let save_frame = Arc::clone(&frame);
+    capture.on_selection_save_requested(move |left, top, right, bottom| {
+        let region = save_frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())
+            .and_then(|guard| {
+                let frame = guard
+                    .as_ref()
+                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+                normalized_region(frame, left, top, right, bottom)
+                    .map_err(|error| error.to_string())
+            });
+
+        let region = match region {
+            Ok(region) => region,
+            Err(error) => {
+                finish_region_capture(&app_weak, &capture_weak, &save_busy, &save_frame, error);
+                return;
+            }
+        };
+
+        if let Some(capture) = capture_weak.upgrade() {
+            let _ = capture.hide();
+        }
+
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG 图片", &["png"])
+            .set_file_name("snow-shot.png")
+            .set_title("保存 Snow Shot 截图")
+            .save_file()
+        else {
+            resume_region_capture(
+                &app_weak,
+                &capture_weak,
+                &save_busy,
+                &save_frame,
+                "已取消保存，当前选区仍可继续处理。",
+            );
+            return;
+        };
+
+        let result = save_frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())
+            .and_then(|guard| {
+                let frame = guard
+                    .as_ref()
+                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+                save_frozen_region_to_path(frame, region, &path).map_err(|error| error.to_string())
+            });
+
+        match result {
+            Ok(summary) => finish_region_capture(
+                &app_weak,
+                &capture_weak,
+                &save_busy,
+                &save_frame,
+                format!(
+                    "已保存 {}×{} 区域截图到 {}。",
+                    summary.width(),
+                    summary.height(),
+                    path.display()
+                ),
+            ),
+            Err(error) => {
+                resume_region_capture(&app_weak, &capture_weak, &save_busy, &save_frame, &error)
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let capture_weak = capture.as_weak();
+    let pin_weak = pin.as_weak();
+    let pin_busy = Arc::clone(&busy);
+    let pin_frame = Arc::clone(&frame);
+    capture.on_selection_pin_requested(move |left, top, right, bottom| {
+        let result = pin_frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())
+            .and_then(|guard| {
+                let frame = guard
+                    .as_ref()
+                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+                let region = normalized_region(frame, left, top, right, bottom)
+                    .map_err(|error| error.to_string())?;
+                let pinned =
+                    extract_frozen_region(frame, region).map_err(|error| error.to_string())?;
+                let region_x = i32::try_from(region.x()).unwrap_or(i32::MAX);
+                let region_y = i32::try_from(region.y()).unwrap_or(i32::MAX);
+
+                Ok((
+                    frame.origin_x().saturating_add(region_x),
+                    frame.origin_y().saturating_add(region_y),
+                    pinned,
+                ))
+            })
+            .and_then(|(origin_x, origin_y, pinned)| {
+                let pin = pin_weak
+                    .upgrade()
+                    .ok_or_else(|| "贴图窗口已不可用。".to_string())?;
+                present_pinned_frame(&pin, pinned, origin_x, origin_y)
+            });
+
+        match result {
+            Ok((width, height)) => finish_region_capture(
+                &app_weak,
+                &capture_weak,
+                &pin_busy,
+                &pin_frame,
+                format!("已创建 {width}×{height} 置顶贴图。"),
+            ),
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let capture_weak = capture.as_weak();
     let cancel_busy = Arc::clone(&busy);
     let cancel_frame = Arc::clone(&frame);
     capture.on_cancelled(move || {
@@ -160,6 +285,32 @@ fn bind_capture_callbacks(
         clear_frame(&frame);
         busy.store(false, Ordering::Release);
         set_status(&app_weak, "已取消区域截图。");
+        CloseRequestResponse::HideWindow
+    });
+}
+
+fn bind_pin_callbacks(pin: &PinWindow) {
+    let pin_weak = pin.as_weak();
+    pin.on_move_requested(move |delta_x, delta_y| {
+        let Some(pin) = pin_weak.upgrade() else {
+            return;
+        };
+        let position = pin.window().position();
+        let scale = pin.window().scale_factor();
+        let delta_x = (delta_x * scale).round() as i32;
+        let delta_y = (delta_y * scale).round() as i32;
+        pin.window().set_position(PhysicalPosition::new(
+            position.x.saturating_add(delta_x),
+            position.y.saturating_add(delta_y),
+        ));
+    });
+
+    let pin_weak = pin.as_weak();
+    pin.on_close_clicked(move || hide_pin(&pin_weak));
+
+    let pin_weak = pin.as_weak();
+    pin.window().on_close_requested(move || {
+        hide_pin(&pin_weak);
         CloseRequestResponse::HideWindow
     });
 }
@@ -239,18 +390,12 @@ fn request_region_capture(
         return;
     }
 
-    if let Some(app) = app_weak.upgrade() {
-        app.set_runtime_status("正在冻结鼠标所在显示器…".into());
-        let _ = app.hide();
-    }
-
     let worker_app = app_weak.clone();
     let worker_busy = Arc::clone(&busy);
     let worker_frame = Arc::clone(&frame);
     let spawn_result = thread::Builder::new()
         .name("snowshot-region-capture".to_string())
         .spawn(move || {
-            thread::sleep(Duration::from_millis(140));
             let result = freeze_monitor_under_cursor();
 
             match result {
@@ -270,7 +415,8 @@ fn request_region_capture(
                                 if let Ok(mut current) = event_frame.lock() {
                                     *current = Some(frozen);
                                     app.set_runtime_status(
-                                        "区域截图中：拖动框选，Enter 复制，Esc 取消。".into(),
+                                        "区域截图中：拖动框选，可复制、保存或贴图；Esc 取消。"
+                                            .into(),
                                     );
                                 } else {
                                     event_busy.store(false, Ordering::Release);
@@ -282,7 +428,6 @@ fn request_region_capture(
                             Err(error) => {
                                 event_busy.store(false, Ordering::Release);
                                 app.set_runtime_status(error.into());
-                                let _ = app.show();
                             }
                         }
                     });
@@ -296,7 +441,6 @@ fn request_region_capture(
                     let status = error.to_string();
                     let _ = worker_app.upgrade_in_event_loop(move |app| {
                         app.set_runtime_status(status.into());
-                        let _ = app.show();
                     });
                 }
             }
@@ -305,7 +449,6 @@ fn request_region_capture(
     if let Err(error) = spawn_result {
         busy.store(false, Ordering::Release);
         set_status(&app_weak, &format!("无法启动截图任务：{error}"));
-        show_settings(&app_weak);
     }
 }
 
@@ -314,43 +457,30 @@ fn request_full_monitor_copy(app_weak: slint::Weak<AppWindow>, busy: Arc<AtomicB
         return;
     }
 
-    if let Some(app) = app_weak.upgrade() {
-        app.set_runtime_status("正在截取鼠标所在显示器并复制…".into());
-        let _ = app.hide();
-    }
-
     let worker_app = app_weak.clone();
     let worker_busy = Arc::clone(&busy);
     let spawn_result = thread::Builder::new()
         .name("snowshot-monitor-copy".to_string())
         .spawn(move || {
-            thread::sleep(Duration::from_millis(140));
             let result = capture_monitor_to_clipboard();
             worker_busy.store(false, Ordering::Release);
 
-            let (status, show_on_error) = match result {
-                Ok(summary) => (
-                    format!(
-                        "已复制 {}×{} 显示器截图到剪贴板。",
-                        summary.width(),
-                        summary.height()
-                    ),
-                    false,
+            let status = match result {
+                Ok(summary) => format!(
+                    "已复制 {}×{} 显示器截图到剪贴板。",
+                    summary.width(),
+                    summary.height()
                 ),
-                Err(error) => (error.to_string(), true),
+                Err(error) => error.to_string(),
             };
             let _ = worker_app.upgrade_in_event_loop(move |app| {
                 app.set_runtime_status(status.into());
-                if show_on_error {
-                    let _ = app.show();
-                }
             });
         });
 
     if let Err(error) = spawn_result {
         busy.store(false, Ordering::Release);
         set_status(&app_weak, &format!("无法启动截图任务：{error}"));
-        show_settings(&app_weak);
     }
 }
 
@@ -380,13 +510,57 @@ fn present_frozen_frame(capture: &CaptureWindow, frame: &FrozenMonitorFrame) -> 
         .window()
         .set_size(PhysicalSize::new(frame.width(), frame.height()));
     capture.set_frozen_frame(Image::from_rgba8(pixels));
+    capture.invoke_prepare_selection();
     capture
         .show()
         .map_err(|error| format!("无法显示区域截图窗口：{error}"))?;
-    capture.invoke_prepare_selection();
-    capture.window().request_redraw();
+    capture.invoke_focus_selection();
 
     Ok(())
+}
+
+fn present_pinned_frame(
+    pin: &PinWindow,
+    frame: FrozenRegionFrame,
+    origin_x: i32,
+    origin_y: i32,
+) -> Result<(u32, u32), String> {
+    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(frame.width(), frame.height());
+    if pixels.make_mut_bytes().len() != frame.rgba().len() {
+        return Err("贴图尺寸与像素数据不一致。".to_string());
+    }
+    pixels.make_mut_bytes().copy_from_slice(frame.rgba());
+
+    let (window_width, window_height) = fitted_pin_size(frame.width(), frame.height());
+    pin.set_pinned_frame(Image::from_rgba8(pixels));
+    pin.window()
+        .set_position(PhysicalPosition::new(origin_x, origin_y));
+    pin.window()
+        .set_size(PhysicalSize::new(window_width, window_height));
+    pin.show()
+        .map_err(|error| format!("无法显示贴图窗口：{error}"))?;
+    pin.invoke_focus_pin();
+
+    Ok((frame.width(), frame.height()))
+}
+
+fn fitted_pin_size(width: u32, height: u32) -> (u32, u32) {
+    const MAX_WIDTH: f32 = 960.0;
+    const MAX_HEIGHT: f32 = 720.0;
+    const MIN_WIDTH: f32 = 96.0;
+    const MIN_HEIGHT: f32 = 64.0;
+
+    let width = width as f32;
+    let height = height as f32;
+    let scale = if width > MAX_WIDTH || height > MAX_HEIGHT {
+        (MAX_WIDTH / width).min(MAX_HEIGHT / height)
+    } else {
+        (MIN_WIDTH / width).max(MIN_HEIGHT / height).max(1.0)
+    };
+    let width = (width * scale).round() as u32;
+    let height = (height * scale).round() as u32;
+
+    (width.max(1), height.max(1))
 }
 
 fn normalized_region(
@@ -425,9 +599,43 @@ fn finish_region_capture(
     set_status(app_weak, &status);
 }
 
+fn resume_region_capture(
+    app_weak: &slint::Weak<AppWindow>,
+    capture_weak: &slint::Weak<CaptureWindow>,
+    busy: &AtomicBool,
+    frame: &SharedFrame,
+    status: &str,
+) {
+    let show_result = capture_weak
+        .upgrade()
+        .ok_or_else(|| "区域截图窗口已不可用。".to_string())
+        .and_then(|capture| {
+            capture
+                .show()
+                .map_err(|error| format!("无法恢复区域截图窗口：{error}"))?;
+            capture.invoke_focus_selection();
+            Ok(())
+        });
+
+    if let Err(error) = show_result {
+        clear_frame(frame);
+        busy.store(false, Ordering::Release);
+        set_status(app_weak, &error);
+    } else {
+        set_status(app_weak, status);
+    }
+}
+
 fn clear_frame(frame: &SharedFrame) {
     if let Ok(mut current) = frame.lock() {
         current.take();
+    }
+}
+
+fn hide_pin(pin_weak: &slint::Weak<PinWindow>) {
+    if let Some(pin) = pin_weak.upgrade() {
+        let _ = pin.hide();
+        pin.set_pinned_frame(Image::default());
     }
 }
 
@@ -441,5 +649,20 @@ fn show_settings(app_weak: &slint::Weak<AppWindow>) {
 fn set_status(app_weak: &slint::Weak<AppWindow>, status: &str) {
     if let Some(app) = app_weak.upgrade() {
         app.set_runtime_status(status.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fitted_pin_size;
+
+    #[test]
+    fn pin_window_caps_large_regions_without_changing_aspect_ratio() {
+        assert_eq!(fitted_pin_size(1920, 1080), (960, 540));
+    }
+
+    #[test]
+    fn pin_window_keeps_close_control_reachable_for_small_regions() {
+        assert_eq!(fitted_pin_size(20, 10), (128, 64));
     }
 }

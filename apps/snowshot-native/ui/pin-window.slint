@@ -1,0 +1,99 @@
+import { SnowTheme } from "theme/snow-theme.slint";
+
+export component PinWindow inherits Window {
+    in-out property <image> pinned-frame;
+    callback move-requested(float, float);
+    callback close-clicked();
+
+    private property <length> drag-anchor-x: 0px;
+    private property <length> drag-anchor-y: 0px;
+    private property <bool> dragging: false;
+
+    title: "Snow Shot 贴图";
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+
+    public function focus-pin() {
+        keyboard-focus.focus();
+    }
+
+    content := Rectangle {
+        width: root.width;
+        height: root.height;
+        background: transparent;
+        border-width: 1px;
+        border-color: #ffffff3d;
+        forward-focus: keyboard-focus;
+
+        Image {
+            width: root.width;
+            height: root.height;
+            source: root.pinned-frame;
+            image-fit: contain;
+        }
+
+        drag-area := TouchArea {
+            mouse-cursor: move;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.drag-anchor-x = self.mouse-x;
+                    root.drag-anchor-y = self.mouse-y;
+                    root.dragging = true;
+                    keyboard-focus.focus();
+                }
+
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                    root.close-clicked();
+                }
+
+                if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                    root.dragging = false;
+                }
+            }
+
+            moved => {
+                if (root.dragging) {
+                    root.move-requested(
+                        (self.mouse-x - root.drag-anchor-x) / 1px,
+                        (self.mouse-y - root.drag-anchor-y) / 1px,
+                    );
+                }
+            }
+        }
+
+        Rectangle {
+            x: root.width - self.width - SnowTheme.space-2;
+            y: SnowTheme.space-2;
+            width: 28px;
+            height: 28px;
+            border-radius: SnowTheme.radius-sm;
+            background: close-area.pressed
+                ? #111317e8
+                : close-area.has-hover
+                    ? #24272bf2
+                    : #24272bcc;
+
+            Text {
+                text: "×";
+                color: white;
+                font-size: 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.close-clicked(); }
+            }
+        }
+
+        keyboard-focus := FocusScope {
+            KeyBinding {
+                keys: @keys(Escape);
+                activated => { root.close-clicked(); }
+            }
+        }
+    }
+}
