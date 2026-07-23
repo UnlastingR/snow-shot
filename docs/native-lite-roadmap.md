@@ -98,6 +98,12 @@ apps/
 - 为截图、剪贴板、窗口识别和 OCR 添加最小集成测试。
 - 保持原 Tauri 前端可运行，作为迁移期间的行为对照。
 
+当前进度：
+
+- 已将现有 `OcrService`、图像预处理和识别结果类型抽离到独立的 `crates/snowshot-ocr`。
+- 旧 `snow-shot-app-services::ocr_service` 路径继续兼容，Tauri OCR command 仅保留 IPC 适配。
+- 已覆盖默认/自定义模型路径及 RGBA 转换单测；下一步抽离截图服务。
+
 ### Phase 2：Native Lite MVP
 
 - Slint 主窗口、托盘和快捷键。

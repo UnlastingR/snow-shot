@@ -4,6 +4,7 @@ pub mod free_drag_window_service;
 pub mod hot_load_page_service;
 pub mod listen_key_service;
 pub mod listen_mouse_service;
-pub mod ocr_service;
 pub mod resize_window_service;
 pub mod video_record_service;
+
+pub use snow_shot_ocr as ocr_service;

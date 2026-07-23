@@ -1,9 +1,5 @@
 use log;
-use paddle_ocr_rs::ocr_result::TextBlock;
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
-use serde::Deserialize;
-use serde::Serialize;
+pub use snow_shot_app_services::ocr_service::OcrDetectResult;
 use snow_shot_app_services::ocr_service::OcrService;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -34,36 +30,6 @@ pub async fn ocr_init(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct OcrDetectResult {
-    pub text_blocks: Vec<TextBlock>,
-    pub scale_factor: f32,
-}
-
-fn convert_rgba_to_rgb(image: &[u8]) -> Vec<u8> {
-    let pixel_count = image.len() / 4;
-    let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-
-    unsafe {
-        rgb_data.set_len(pixel_count * 3);
-
-        let image_ptr_address = image.as_ptr() as usize;
-        let rgb_ptr_address = rgb_data.as_mut_ptr() as usize;
-
-        (0..pixel_count).into_par_iter().for_each(|i| {
-            let image_base = i * 4;
-            let rgb_base = i * 3;
-            std::ptr::copy_nonoverlapping(
-                (image_ptr_address as *const u8).add(image_base),
-                (rgb_ptr_address as *mut u8).add(rgb_base),
-                3,
-            );
-        });
-    }
-
-    rgb_data
-}
-
 pub async fn ocr_detect_core(
     ocr_service: tauri::State<'_, Mutex<OcrService>>,
     image: image::DynamicImage,
@@ -71,50 +37,7 @@ pub async fn ocr_detect_core(
     detect_angle: bool,
 ) -> Result<OcrDetectResult, String> {
     let mut ocr_service = ocr_service.lock().await;
-    let mut scale_factor = scale_factor;
-    let mut image = image;
-
-    // 分辨率过小的图片识别可能有问题，当 scale_factor 低于 1.5 时，放大图片使有效缩放达到 1.5
-    let target_scale_factor = 1.5;
-    if scale_factor < target_scale_factor && scale_factor > 0.0 {
-        scale_factor = target_scale_factor;
-        let resize_factor = target_scale_factor / scale_factor;
-        image = image.resize(
-            (image.width() as f32 * resize_factor) as u32,
-            (image.height() as f32 * resize_factor) as u32,
-            image::imageops::FilterType::Lanczos3,
-        );
-    }
-
-    let max_size = image.height().max(image.width());
-
-    let image_buffer = match image {
-        image::DynamicImage::ImageRgb8(image) => image,
-        image::DynamicImage::ImageRgba8(image) => {
-            let rgb_data = convert_rgba_to_rgb(image.as_raw());
-            image::RgbImage::from_raw(image.width(), image.height(), rgb_data).unwrap()
-        }
-        _ => return Err("[ocr_detect_core] Invalid image".to_string()),
-    };
-    let ocr_result = ocr_service.get_session().await?.detect_angle_rollback(
-        &image_buffer,
-        50,
-        max_size,
-        0.5,
-        0.3,
-        1.6,
-        detect_angle,
-        false,
-        0.9, // 屏幕截取的文字质量通常较高，且非横向排版的情况较少，尽量减少角度的影响
-    );
-
-    match ocr_result {
-        Ok(ocr_result) => Ok(OcrDetectResult {
-            text_blocks: ocr_result.text_blocks,
-            scale_factor,
-        }),
-        Err(e) => return Err(format!("[ocr_detect_core] Failed to detect text: {}", e)),
-    }
+    ocr_service.detect(image, scale_factor, detect_angle).await
 }
 
 pub async fn ocr_detect(

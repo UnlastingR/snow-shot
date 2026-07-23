@@ -6815,13 +6815,11 @@ dependencies = [
  "ffmpeg-sidecar",
  "log",
  "macos-accessibility-client",
- "num_cpus",
- "ort",
- "paddle-ocr-rs",
  "regex",
  "serde",
  "snow-shot-app-shared",
  "snow-shot-app-utils",
+ "snow-shot-ocr",
  "tauri",
  "tokio",
  "xcap",
@@ -6883,6 +6881,20 @@ dependencies = [
  "rust-s3",
  "serde",
  "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
+name = "snow-shot-ocr"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "log",
+ "num_cpus",
+ "ort",
+ "paddle-ocr-rs",
+ "rayon",
+ "serde",
  "tokio",
 ]
 
@@ -6957,9 +6969,6 @@ version = "0.1.0"
 dependencies = [
  "image",
  "log",
- "paddle-ocr-rs",
- "rayon",
- "serde",
  "snow-shot-app-services",
  "snow-shot-webview",
  "tauri",
