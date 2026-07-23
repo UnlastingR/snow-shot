@@ -30,6 +30,7 @@ dist/
 # production
 /build
 /apps/snowshot-native/target/
+/tools/capture-flicker-lab/target/
 
 # misc
 .DS_Store
