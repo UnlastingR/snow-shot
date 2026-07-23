@@ -18,6 +18,7 @@ use crate::capture_workflow::{
     copy_frozen_region_to_clipboard, extract_frozen_region, freeze_monitor_under_cursor,
     save_frozen_region_to_path,
 };
+use crate::resize_geometry::project_size_to_aspect;
 use crate::windows_pin::{
     PinCompositor, PinFrame, destroy_pin_window, hide_pin_window, is_pin_window, show_pin_window,
 };
@@ -97,6 +98,27 @@ impl ResizeCorner {
         match self {
             Self::TopLeft | Self::TopRight => -1.0,
             Self::BottomLeft | Self::BottomRight => 1.0,
+        }
+    }
+
+    fn point(self, rect: FloatRect) -> FloatPoint {
+        match self {
+            Self::TopLeft => FloatPoint {
+                x: rect.left,
+                y: rect.top,
+            },
+            Self::TopRight => FloatPoint {
+                x: rect.right,
+                y: rect.top,
+            },
+            Self::BottomLeft => FloatPoint {
+                x: rect.left,
+                y: rect.bottom,
+            },
+            Self::BottomRight => FloatPoint {
+                x: rect.right,
+                y: rect.bottom,
+            },
         }
     }
 }
@@ -816,10 +838,15 @@ fn transform_selection(
     }
 
     let corner = ResizeCorner::from_mode(mode)?;
+    let start_corner = corner.point(start);
+    let effective_pointer = FloatPoint {
+        x: start_corner.x + pointer.x - start_pointer.x,
+        y: start_corner.y + pointer.y - start_pointer.y,
+    };
     let aspect = start.width() / start.height();
     Some(resize_rect_from_pointer(
         start,
-        pointer,
+        effective_pointer,
         corner,
         preserve_aspect,
         centered,
@@ -919,15 +946,9 @@ fn resize_rect_from_pointer(
         } else {
             start.width() / start.height()
         };
-        let raw_width = raw_width.max(1.0);
-        let raw_height = raw_height.max(1.0);
-        let width_change = (raw_width / start.width() - 1.0).abs();
-        let height_change = (raw_height / start.height() - 1.0).abs();
-        let (mut width, mut height) = if width_change >= height_change {
-            (raw_width, raw_width / aspect)
-        } else {
-            (raw_height * aspect, raw_height)
-        };
+        let (_, projected_height) = project_size_to_aspect(raw_width, raw_height, aspect);
+        let mut height = projected_height.max(f32::MIN_POSITIVE);
+        let mut width = height * aspect;
 
         let grow_for_minimum = (limits.min_width / width)
             .max(limits.min_height / height)
@@ -1230,8 +1251,8 @@ mod tests {
             FloatRect {
                 left: 10.0,
                 top: 10.0,
-                right: 110.0,
-                bottom: 60.0,
+                right: 78.0,
+                bottom: 44.0,
             },
         );
     }
@@ -1296,10 +1317,10 @@ mod tests {
         assert_rect(
             resized,
             FloatRect {
-                left: 40.0,
-                top: 60.0,
-                right: 160.0,
-                bottom: 120.0,
+                left: 64.0,
+                top: 72.0,
+                right: 136.0,
+                bottom: 108.0,
             },
         );
     }
@@ -1332,10 +1353,37 @@ mod tests {
             FloatRect {
                 left: 0.0,
                 top: 0.0,
-                right: 800.0,
-                bottom: 400.0,
+                right: 640.0,
+                bottom: 320.0,
             },
         );
+    }
+
+    #[test]
+    fn selection_resize_preserves_pointer_offset_inside_handle() {
+        let start = FloatRect {
+            left: 10.0,
+            top: 10.0,
+            right: 50.0,
+            bottom: 30.0,
+        };
+        let unchanged = transform_selection(
+            4,
+            start,
+            FloatPoint { x: 47.0, y: 27.0 },
+            FloatPoint { x: 47.0, y: 27.0 },
+            FloatRect {
+                left: 0.0,
+                top: 0.0,
+                right: 200.0,
+                bottom: 200.0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_rect(unchanged, start);
     }
 
     #[test]

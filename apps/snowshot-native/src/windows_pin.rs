@@ -37,9 +37,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Interface, PCWSTR, w};
 
+use crate::resize_geometry::proportional_scale_from_delta;
+
 const PIN_CLASS_NAME: PCWSTR = w!("SnowShotDirectCompositionPin");
 const PIN_WINDOW_TITLE: PCWSTR = w!("Snow Shot 贴图");
-const SHADOW_EXTENT: i32 = 2;
+const SHADOW_EXTENT: i32 = 6;
+const SHADOW_OFFSET: f32 = 2.0;
+const SHADOW_BLUR: f32 = 6.0;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 const MIN_CONTENT_WIDTH: f32 = 96.0;
 const MIN_CONTENT_HEIGHT: f32 = 64.0;
@@ -139,7 +143,6 @@ impl PinCompositor {
                 interaction: None,
                 close_pressed: false,
                 hover_close: false,
-                hover_corner: None,
                 tracking_mouse: false,
             });
             let state_ptr = Box::into_raw(state);
@@ -300,14 +303,11 @@ struct PinComposition {
     _image_visual: IDCompositionVisual,
     shadow_visual: IDCompositionVisual,
     close_visual: IDCompositionVisual,
-    handle_visuals: Vec<IDCompositionVisual>,
     scale_transform: IDCompositionScaleTransform,
     shadow_effect: IDCompositionShadowEffect,
     close_effect: IDCompositionEffectGroup,
-    handle_effects: Vec<IDCompositionEffectGroup>,
     _image_surface: IDCompositionSurface,
     _close_surface: IDCompositionSurface,
-    _handle_surface: IDCompositionSurface,
     source_width: f32,
     source_height: f32,
     metrics: PinMetrics,
@@ -322,13 +322,10 @@ impl PinComposition {
     ) -> Result<Self, String> {
         let image_pixels = rgba_to_premultiplied_bgra(frame.rgba);
         let close_pixels = close_button_pixels(metrics.close_size);
-        let handle_pixels = resize_handle_pixels(metrics.handle_size);
         let image_surface =
             compositor.create_surface(frame.source_width, frame.source_height, &image_pixels)?;
         let close_surface =
             compositor.create_surface(metrics.close_size, metrics.close_size, &close_pixels)?;
-        let handle_surface =
-            compositor.create_surface(metrics.handle_size, metrics.handle_size, &handle_pixels)?;
 
         // SAFETY: hwnd is a live window owned by this process.
         let target = unsafe { compositor.desktop_device.CreateTargetForHwnd(hwnd, true) }
@@ -337,9 +334,6 @@ impl PinComposition {
         let shadow_visual = compositor.create_visual()?;
         let image_visual = compositor.create_visual()?;
         let close_visual = compositor.create_visual()?;
-        let handle_visuals = (0..4)
-            .map(|_| compositor.create_visual())
-            .collect::<Result<Vec<_>, _>>()?;
 
         // SAFETY: all objects come from the same DirectComposition device.
         let scale_transform = unsafe { compositor.dcomp_device.CreateScaleTransform() }
@@ -350,18 +344,11 @@ impl PinComposition {
         // SAFETY: effect groups are compositor-owned scalar property containers.
         let close_effect = unsafe { compositor.dcomp_device.CreateEffectGroup() }
             .map_err(|error| format!("无法创建关闭按钮透明度效果：{error}"))?;
-        let handle_effects = (0..4)
-            .map(|_| {
-                // SAFETY: effect group creation has no external pointer inputs.
-                unsafe { compositor.dcomp_device.CreateEffectGroup() }
-                    .map_err(|error| format!("无法创建缩放手柄透明度效果：{error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
         let configure_visual_tree = || -> windows::core::Result<()> {
             // SAFETY: all surfaces, visuals, transforms and effects share the same DComp device.
             unsafe {
-                shadow_effect.SetStandardDeviation2(2.0)?;
+                shadow_effect.SetStandardDeviation2(SHADOW_BLUR)?;
                 shadow_effect.SetRed2(0.0)?;
                 shadow_effect.SetGreen2(0.0)?;
                 shadow_effect.SetBlue2(0.0)?;
@@ -381,20 +368,9 @@ impl PinComposition {
                 close_effect.SetOpacity2(0.32)?;
                 close_visual.SetEffect(&close_effect)?;
 
-                for (visual, effect) in handle_visuals.iter().zip(&handle_effects) {
-                    visual.SetContent(&handle_surface)?;
-                    effect.SetOpacity2(0.22)?;
-                    visual.SetEffect(effect)?;
-                }
-
                 root.AddVisual(&shadow_visual, false, None::<&IDCompositionVisual>)?;
                 root.AddVisual(&image_visual, true, &shadow_visual)?;
-                let mut reference = image_visual.clone();
-                for visual in &handle_visuals {
-                    root.AddVisual(visual, true, &reference)?;
-                    reference = visual.clone();
-                }
-                root.AddVisual(&close_visual, true, &reference)?;
+                root.AddVisual(&close_visual, true, &image_visual)?;
                 target.SetRoot(&root)?;
             }
             Ok(())
@@ -409,14 +385,11 @@ impl PinComposition {
             _image_visual: image_visual,
             shadow_visual,
             close_visual,
-            handle_visuals,
             scale_transform,
             shadow_effect,
             close_effect,
-            handle_effects,
             _image_surface: image_surface,
             _close_surface: close_surface,
-            _handle_surface: handle_surface,
             source_width: frame.source_width as f32,
             source_height: frame.source_height as f32,
             metrics,
@@ -431,18 +404,13 @@ impl PinComposition {
         let scale_x = (content_width / self.source_width).max(0.001);
         let scale_y = (content_height / self.source_height).max(0.001);
         let shadow_scale = scale_x.min(scale_y).max(0.001);
-        let shadow_local_offset_x = SHADOW_EXTENT as f32 / scale_x;
-        let shadow_local_offset_y = SHADOW_EXTENT as f32 / scale_y;
-        let shadow_local_blur = 2.0 / shadow_scale;
+        let shadow_local_offset_x = SHADOW_OFFSET / scale_x;
+        let shadow_local_offset_y = SHADOW_OFFSET / scale_y;
+        let shadow_local_blur = SHADOW_BLUR / shadow_scale;
         let close_x =
             (content_width - self.metrics.close_size as f32 - self.metrics.close_margin as f32)
                 .max(0.0);
         let close_y = self.metrics.close_margin as f32;
-        let handle_size = self.metrics.handle_size as f32;
-        let right = (content_width - handle_size).max(0.0);
-        let bottom = (content_height - handle_size).max(0.0);
-        let handle_positions = [(0.0, 0.0), (right, 0.0), (0.0, bottom), (right, bottom)];
-
         let update_layout = || -> windows::core::Result<()> {
             // SAFETY: properties are updated transactionally and committed together below.
             unsafe {
@@ -454,10 +422,6 @@ impl PinComposition {
                     .SetStandardDeviation2(shadow_local_blur)?;
                 self.close_visual.SetOffsetX2(close_x)?;
                 self.close_visual.SetOffsetY2(close_y)?;
-                for (visual, (x, y)) in self.handle_visuals.iter().zip(handle_positions) {
-                    visual.SetOffsetX2(x)?;
-                    visual.SetOffsetY2(y)?;
-                }
             }
             Ok(())
         };
@@ -465,20 +429,12 @@ impl PinComposition {
         Ok(())
     }
 
-    fn set_hover(&self, close_hot: bool, corner_hot: Option<ResizeCorner>) -> Result<(), String> {
+    fn set_close_hover(&self, close_hot: bool) -> Result<(), String> {
         let update_opacity = || -> windows::core::Result<()> {
-            // SAFETY: opacity values are finite and effects belong to this device.
+            // SAFETY: the opacity value is finite and the effect belongs to this device.
             unsafe {
                 self.close_effect
                     .SetOpacity2(if close_hot { 1.0 } else { 0.32 })?;
-                for (index, effect) in self.handle_effects.iter().enumerate() {
-                    let corner = ResizeCorner::from_index(index);
-                    effect.SetOpacity2(if Some(corner) == corner_hot {
-                        1.0
-                    } else {
-                        0.22
-                    })?;
-                }
             }
             Ok(())
         };
@@ -510,7 +466,6 @@ struct NativePinState {
     interaction: Option<PointerInteraction>,
     close_pressed: bool,
     hover_close: bool,
-    hover_corner: Option<ResizeCorner>,
     tracking_mouse: bool,
 }
 
@@ -520,7 +475,7 @@ impl NativePinState {
         if self.is_over_close(client_x, client_y) {
             self.close_pressed = true;
             self.hover_close = true;
-            let _ = self.composition.set_hover(true, None);
+            let _ = self.composition.set_close_hover(true);
             return false;
         }
 
@@ -536,8 +491,10 @@ impl NativePinState {
                 start_rect: self.rect,
             },
         });
-        self.hover_corner = corner;
-        let _ = self.composition.set_hover(false, corner);
+        if self.hover_close {
+            self.hover_close = false;
+            let _ = self.composition.set_close_hover(false);
+        }
         true
     }
 
@@ -568,15 +525,9 @@ impl NativePinState {
 
         let (client_x, client_y) = self.client_point(point);
         let close_hot = self.is_over_close(client_x, client_y);
-        let corner_hot = if close_hot {
-            None
-        } else {
-            self.corner_at(client_x, client_y)
-        };
-        if close_hot != self.hover_close || corner_hot != self.hover_corner {
+        if close_hot != self.hover_close {
             self.hover_close = close_hot;
-            self.hover_corner = corner_hot;
-            let _ = self.composition.set_hover(close_hot, corner_hot);
+            let _ = self.composition.set_close_hover(close_hot);
         }
     }
 
@@ -722,8 +673,7 @@ impl NativePinState {
         self.tracking_mouse = false;
         if self.interaction.is_none() {
             self.hover_close = false;
-            self.hover_corner = None;
-            let _ = self.composition.set_hover(false, None);
+            let _ = self.composition.set_close_hover(false);
         }
     }
 
@@ -770,15 +720,6 @@ enum ResizeCorner {
 }
 
 impl ResizeCorner {
-    fn from_index(index: usize) -> Self {
-        match index {
-            0 => Self::TopLeft,
-            1 => Self::TopRight,
-            2 => Self::BottomLeft,
-            _ => Self::BottomRight,
-        }
-    }
-
     fn signs(self) -> (f32, f32) {
         match self {
             Self::TopLeft => (-1.0, -1.0),
@@ -819,7 +760,6 @@ impl ScreenRect {
 struct PinMetrics {
     close_size: u32,
     close_margin: u32,
-    handle_size: u32,
     corner_hit_size: u32,
 }
 
@@ -831,7 +771,6 @@ impl PinMetrics {
         Self {
             close_size: (28.0 * scale).round().max(20.0) as u32,
             close_margin: (4.0 * scale).round().max(3.0) as u32,
-            handle_size: (12.0 * scale).round().max(10.0) as u32,
             corner_hit_size: (14.0 * scale).round().max(12.0) as u32,
         }
     }
@@ -847,22 +786,17 @@ fn resize_from_corner(
     let start_width = start_rect.content_width();
     let start_height = start_rect.content_height();
     let (horizontal_sign, vertical_sign) = corner.signs();
-    let horizontal_delta =
-        (pointer.x - start_pointer.x) as f32 * horizontal_sign / start_width.max(1.0);
-    let vertical_delta =
-        (pointer.y - start_pointer.y) as f32 * vertical_sign / start_height.max(1.0);
-    let dominant_delta = if horizontal_delta.abs() >= vertical_delta.abs() {
-        horizontal_delta
-    } else {
-        vertical_delta
-    };
+    let horizontal_delta = (pointer.x - start_pointer.x) as f32 * horizontal_sign;
+    let vertical_delta = (pointer.y - start_pointer.y) as f32 * vertical_sign;
+    let projected_scale =
+        proportional_scale_from_delta(horizontal_delta, vertical_delta, start_width, start_height);
     let min_scale = (MIN_CONTENT_WIDTH / start_width)
         .max(MIN_CONTENT_HEIGHT / start_height)
         .min(1.0);
     let max_scale = (MAX_CONTENT_WIDTH / start_width)
         .min(MAX_CONTENT_HEIGHT / start_height)
         .max(1.0);
-    let scale = (1.0 + dominant_delta).clamp(min_scale, max_scale);
+    let scale = projected_scale.clamp(min_scale, max_scale);
     let content_width = (start_width * scale).clamp(MIN_CONTENT_WIDTH, MAX_CONTENT_WIDTH);
     let content_height = (content_width / aspect).clamp(MIN_CONTENT_HEIGHT, MAX_CONTENT_HEIGHT);
     let width = content_width + SHADOW_EXTENT as f32;
@@ -1116,23 +1050,6 @@ fn close_button_pixels(size: u32) -> Vec<u8> {
     pixels
 }
 
-fn resize_handle_pixels(size: u32) -> Vec<u8> {
-    let mut pixels = vec![0_u8; size as usize * size as usize * 4];
-    let border = (size / 6).max(2);
-    for y in 0..size {
-        for x in 0..size {
-            let edge = x < border || y < border || x >= size - border || y >= size - border;
-            let color = if edge {
-                [16, 185, 129, 255]
-            } else {
-                [255, 255, 255, 255]
-            };
-            write_bgra_pixel(&mut pixels, size, x, y, color);
-        }
-    }
-    pixels
-}
-
 fn rounded_rect_contains(x: f32, y: f32, size: f32, radius: f32) -> bool {
     let clamped_x = x.clamp(radius, size - radius);
     let clamped_y = y.clamp(radius, size - radius);
@@ -1266,8 +1183,8 @@ mod tests {
         // SAFETY: hwnd is live and rect is writable for this call.
         unsafe { GetWindowRect(hwnd, &mut rect) }
             .map_err(|error| format!("无法读取测试贴图尺寸：{error}"))?;
-        assert_eq!(rect.right - rect.left, 558);
-        assert_eq!(rect.bottom - rect.top, 315);
+        assert_eq!(rect.right - rect.left, 562);
+        assert_eq!(rect.bottom - rect.top, 319);
         Ok(())
     }
 
