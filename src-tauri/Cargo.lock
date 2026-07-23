@@ -6839,7 +6839,6 @@ name = "snow-shot-app-utils"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "clipboard-win",
  "device_query",
  "image",
  "log",
@@ -6874,6 +6873,15 @@ dependencies = [
  "windows 0.61.3",
  "windows-capture 2.0.0-alpha.7",
  "xcap",
+]
+
+[[package]]
+name = "snow-shot-clipboard"
+version = "0.1.0"
+dependencies = [
+ "clipboard-win",
+ "image",
+ "rayon",
 ]
 
 [[package]]
@@ -6943,6 +6951,7 @@ dependencies = [
  "snow-shot-app-services",
  "snow-shot-app-shared",
  "snow-shot-app-utils",
+ "snow-shot-clipboard",
  "snow-shot-webview",
  "tauri",
  "tauri-plugin-clipboard-manager",

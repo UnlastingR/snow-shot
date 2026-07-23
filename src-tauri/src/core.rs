@@ -412,7 +412,7 @@ pub async fn write_bitmap_image_to_clipboard_with_shared_buffer(
     shared_buffer_service: tauri::State<'_, Arc<snow_shot_webview::SharedBufferService>>,
     channel_id: String,
 ) -> Result<(), String> {
-    snow_shot_app_utils::write_bitmap_image_to_clipboard_with_shared_buffer(
+    snow_shot_tauri_commands_core::write_bitmap_image_to_clipboard_with_shared_buffer(
         shared_buffer_service,
         channel_id,
     )

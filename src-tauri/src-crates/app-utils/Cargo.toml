@@ -29,4 +29,3 @@ image = { workspace = true }
 webview2-com = "0.38.0"
 windows-core = { version = "0.61" }
 snow-shot-webview = { workspace = true }
-clipboard-win = { workspace = true }

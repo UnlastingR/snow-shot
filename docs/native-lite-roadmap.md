@@ -110,7 +110,10 @@ apps/
 - HDR 像素转换不再使用未初始化缓冲区或裸指针；无边框不受支持时会真正降级重试。
 - macOS arm64 的 `scap` 显示器采集、排除窗口和焦点窗口采集已迁移到 `snowshot-capture::macos`。
 - Tauri 适配层仅负责将 `NSWindow` 转成排除窗口 ID；BGRA 帧尺寸校验和颜色转换由 Core 负责。
-- 下一步在 Apple runner 完成原生编译、权限和多显示器实测，再抽离剪贴板 service。
+- macOS 原生编译、权限和多显示器实测暂缓，后续统一在 Apple runner 完成。
+- 已新增 `crates/snowshot-clipboard`，承载 Windows `CF_DIB` 编码、图片写入和 SharedBuffer RGBA 载荷校验。
+- DIB 构建不再使用未初始化缓冲区或裸指针，Tauri 层只保留 IPC/SharedBuffer 适配。
+- Windows 下一步抽离窗口识别 service，并补截图到剪贴板的集成边界测试。
 
 ### Phase 2：Native Lite MVP
 

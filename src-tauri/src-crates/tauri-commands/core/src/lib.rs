@@ -871,7 +871,17 @@ pub async fn write_bitmap_image_to_clipboard(
         }
     };
 
-    snow_shot_app_utils::write_bitmap_image_to_clipboard(image_data).await
+    #[cfg(target_os = "windows")]
+    {
+        snow_shot_clipboard::write_png_image(image_data)
+            .map_err(|error| format!("[write_bitmap_image_to_clipboard] {error}"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = image_data;
+        Err("[write_bitmap_image_to_clipboard] Not supported on this platform".to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -879,11 +889,16 @@ pub async fn write_bitmap_image_to_clipboard_with_shared_buffer(
     shared_buffer_service: tauri::State<'_, Arc<snow_shot_webview::SharedBufferService>>,
     channel_id: String,
 ) -> Result<(), String> {
-    snow_shot_app_utils::write_bitmap_image_to_clipboard_with_shared_buffer(
-        shared_buffer_service,
-        channel_id,
-    )
-    .await
+    let image_data = shared_buffer_service
+        .receive_data(channel_id)
+        .map_err(|error| {
+            format!(
+                "[write_bitmap_image_to_clipboard_with_shared_buffer] Failed to receive image data: {error}"
+            )
+        })?;
+
+    snow_shot_clipboard::write_shared_buffer_payload(&image_data)
+        .map_err(|error| format!("[write_bitmap_image_to_clipboard_with_shared_buffer] {error}"))
 }
 
 /// 保留目录中指定的文件，删除其他所有文件
@@ -1012,22 +1027,17 @@ pub async fn write_image_pixels_to_clipboard_with_shared_buffer(
         }
     };
 
-    // 最后 8 个字节是 image_width 和 image_height
-    let image_width = u32::from_le_bytes(
-        image_data[image_data.len() - 8..image_data.len() - 4]
-            .try_into()
-            .unwrap(),
-    );
-    let image_height = u32::from_le_bytes(
-        image_data[image_data.len() - 4..image_data.len()]
-            .try_into()
-            .unwrap(),
-    );
+    let payload =
+        snow_shot_clipboard::parse_shared_buffer_payload(&image_data).map_err(|error| {
+            format!(
+                "[write_image_pixels_to_clipboard_with_shared_buffer] Invalid image data: {error}"
+            )
+        })?;
 
     match app.clipboard().write_image(&tauri::image::Image::new(
-        &image_data[..image_data.len() - 8],
-        image_width,
-        image_height,
+        payload.pixels(),
+        payload.width(),
+        payload.height(),
     )) {
         Ok(_) => Ok(()),
         Err(e) => Err(format!(
