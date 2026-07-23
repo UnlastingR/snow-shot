@@ -1,0 +1,44 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+
+export component SnowNavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> meta;
+    in property <bool> selected: false;
+    callback activated();
+
+    height: SnowTheme.nav-row-height;
+    border-radius: SnowTheme.radius-sm;
+    background: root.selected
+        ? SnowTheme.selected-bg
+        : hit.pressed
+            ? SnowTheme.pressed-bg
+            : hit.has-hover
+                ? SnowTheme.hover-bg
+                : transparent;
+
+    HorizontalLayout {
+        padding-left: SnowTheme.space-3;
+        padding-right: SnowTheme.space-3;
+        spacing: SnowTheme.space-2;
+
+        Text {
+            text: root.label;
+            color: root.selected ? SnowTheme.text-primary : SnowTheme.text-secondary;
+            font-size: SnowTheme.label-size;
+            font-weight: root.selected ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.meta;
+            color: SnowTheme.text-muted;
+            font-size: SnowTheme.caption-size;
+            vertical-alignment: center;
+        }
+    }
+
+    hit := TouchArea {
+        clicked => { root.activated(); }
+    }
+}

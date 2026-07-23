@@ -24,10 +24,20 @@ Snow UI 是 Snow Shot Native Lite 的桌面设计语言。目标是复用现代 
 ## 单一事实来源
 
 - 机器可读 Token：`design/snow-ui.tokens.json`
-- Slint 实现：`apps/snowshot-native/ui/snow-ui.slint`
+- Slint Token：`apps/snowshot-native/ui/theme/snow-theme.slint`
+- Slint 基础组件：`apps/snowshot-native/ui/components/`
+- Slint 页面组合：`apps/snowshot-native/ui/pages/`
 - 设置页骨架：`apps/snowshot-native/ui/app-window.slint`
 
 修改颜色、间距、圆角、字体尺寸和控件高度时，应先修改 Token，再同步 Slint。禁止在具体页面中散落新的硬编码颜色。
+
+## Slint 分层
+
+- `theme/` 只维护颜色、排版、间距和尺寸 Token，不包含业务状态。
+- `components/` 只维护可复用的无业务控件，以 property 和 callback 作为接口。
+- `pages/` 负责页面信息架构、组件组合和业务 callback 转发，不直接实现系统能力。
+- `app-window.slint` 只维护窗口属性、页面挂载和 Rust callback 边界。
+- Rust service 只能绑定窗口或页面暴露的 callback，不得反向侵入主题与基础组件。
 
 ## 核心原则
 

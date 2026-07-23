@@ -1,165 +1,19 @@
-import {
-    SnowTheme,
-    SnowDivider,
-    SnowSectionLabel,
-    SnowNavItem,
-    SnowIconButton,
-    SnowSettingsActionRow,
-} from "snow-ui.slint";
+import { SnowTheme } from "theme/snow-theme.slint";
+import { SettingsShell } from "pages/settings-shell.slint";
 
 export component AppWindow inherits Window {
+    callback autostart-clicked();
+    callback close-behavior-clicked();
+    callback ocr-config-clicked();
+
     title: "Snow Shot Native Lite";
     width: 1120px;
     height: 720px;
     background: SnowTheme.window-bg;
 
-    HorizontalLayout {
-        spacing: 0px;
-
-        Rectangle {
-            width: SnowTheme.sidebar-width;
-            background: SnowTheme.sidebar-bg;
-
-            VerticalLayout {
-                padding-left: SnowTheme.space-3;
-                padding-right: SnowTheme.space-3;
-                padding-top: SnowTheme.space-3;
-                padding-bottom: SnowTheme.space-3;
-                spacing: SnowTheme.space-1;
-
-                HorizontalLayout {
-                    height: SnowTheme.topbar-height;
-                    spacing: SnowTheme.space-2;
-
-                    Text {
-                        text: "Snow Shot";
-                        color: SnowTheme.text-primary;
-                        font-size: SnowTheme.subtitle-size;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-
-                    SnowIconButton { glyph: "⋯"; }
-                }
-
-                SnowSectionLabel { label: "常用"; height: 28px; }
-                SnowNavItem { label: "截图"; }
-                SnowNavItem { label: "贴图"; }
-                SnowNavItem { label: "历史记录"; }
-
-                Rectangle { height: SnowTheme.space-3; background: transparent; }
-
-                SnowSectionLabel { label: "设置"; height: 28px; }
-                SnowNavItem { label: "常规"; selected: true; }
-                SnowNavItem { label: "快捷键"; }
-                SnowNavItem { label: "标注"; }
-                SnowNavItem { label: "OCR"; meta: "可选"; }
-                SnowNavItem { label: "保存"; }
-                SnowNavItem { label: "关于"; }
-
-                Rectangle { vertical-stretch: 1; background: transparent; }
-
-                SnowNavItem { label: "检查更新"; meta: "0.1.0"; }
-            }
-        }
-
-        SnowDivider {}
-
-        Rectangle {
-            horizontal-stretch: 1;
-            background: SnowTheme.surface-bg;
-
-            VerticalLayout {
-                spacing: 0px;
-
-                Rectangle {
-                    height: SnowTheme.topbar-height;
-                    background: SnowTheme.surface-bg;
-
-                    HorizontalLayout {
-                        padding-left: SnowTheme.space-6;
-                        padding-right: SnowTheme.space-4;
-                        spacing: SnowTheme.space-2;
-
-                        Text {
-                            text: "常规";
-                            color: SnowTheme.text-primary;
-                            font-size: SnowTheme.subtitle-size;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        SnowIconButton { glyph: "?"; }
-                    }
-                }
-
-                Rectangle { height: 1px; background: SnowTheme.border; }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-                    background: SnowTheme.surface-bg;
-
-                    VerticalLayout {
-                        padding-left: SnowTheme.space-6;
-                        padding-right: SnowTheme.space-6;
-                        padding-top: SnowTheme.space-6;
-                        padding-bottom: SnowTheme.space-6;
-                        spacing: SnowTheme.space-6;
-
-                        VerticalLayout {
-                            spacing: SnowTheme.space-3;
-
-                            Text {
-                                text: "启动与行为";
-                                color: SnowTheme.text-primary;
-                                font-size: SnowTheme.title-size;
-                                font-weight: 600;
-                            }
-
-                            Rectangle { height: 1px; background: SnowTheme.border; }
-
-                            SnowSettingsActionRow {
-                                title: "开机启动";
-                                description: "登录系统后在托盘中启动 Snow Shot，不创建主窗口。";
-                                action-label: "启用";
-                            }
-
-                            Rectangle { height: 1px; background: SnowTheme.border; }
-
-                            SnowSettingsActionRow {
-                                title: "关闭窗口时";
-                                description: "销毁设置窗口并保留托盘服务，避免隐藏窗口长期占用内存。";
-                                action-label: "退出到托盘";
-                            }
-                        }
-
-                        VerticalLayout {
-                            spacing: SnowTheme.space-3;
-
-                            Text {
-                                text: "OCR";
-                                color: SnowTheme.text-primary;
-                                font-size: SnowTheme.title-size;
-                                font-weight: 600;
-                            }
-
-                            Rectangle { height: 1px; background: SnowTheme.border; }
-
-                            SnowSettingsActionRow {
-                                title: "现有本地 OCR";
-                                description: "沿用当前 OcrService、ONNX Runtime 与 PP-OCRv4 模型路径，空闲后释放模型会话。";
-                                action-label: "配置";
-                                primary: true;
-                            }
-                        }
-
-                        Rectangle { vertical-stretch: 1; background: transparent; }
-                    }
-                }
-            }
-        }
+    SettingsShell {
+        autostart-clicked => { root.autostart-clicked(); }
+        close-behavior-clicked => { root.close-behavior-clicked(); }
+        ocr-config-clicked => { root.ocr-config-clicked(); }
     }
 }

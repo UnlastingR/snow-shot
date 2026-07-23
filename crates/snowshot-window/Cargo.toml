@@ -1,0 +1,11 @@
+[package]
+name = "snow-shot-window"
+version = "0.1.0"
+edition = "2024"
+publish = false
+workspace = "../../src-tauri"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+rayon = { workspace = true }
+windows = { workspace = true, features = ["Win32_Foundation"] }
+xcap = { workspace = true }

@@ -29,6 +29,7 @@ dist/
 
 # production
 /build
+/apps/snowshot-native/target/
 
 # misc
 .DS_Store

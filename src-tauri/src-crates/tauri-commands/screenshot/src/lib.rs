@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Serialize;
 use snow_shot_app_os::ui_automation::UIElements;
@@ -9,10 +10,6 @@ use snow_shot_capture::PixelFormat;
 use snow_shot_capture::macos as macos_capture_backend;
 #[cfg(target_os = "windows")]
 use snow_shot_capture::windows as windows_capture_backend;
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HWND;
-#[cfg(target_os = "windows")]
-use std::ffi::c_void;
 use snow_shot_app_shared::ElementRect;
 use snow_shot_app_utils::monitor_info::{
     CaptureOption, ColorFormat, CorrectHdrColorAlgorithm, MonitorList,
@@ -374,166 +371,81 @@ pub async fn get_window_elements(
     #[allow(unused_variables)] window: tauri::Window,
     #[allow(unused_variables)] blacklist: Option<Vec<String>>,
 ) -> Result<Vec<WindowElement>, ()> {
-    // 获取所有窗口，简单筛选下需要的窗口，然后获取窗口所有元素
-    let windows = {
-        #[cfg(target_os = "windows")]
-        {
-            xcap::Window::all()
-                .unwrap_or_default()
-                .iter()
-                .map(|window| window.hwnd().unwrap() as usize)
-                .collect::<Vec<usize>>()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            xcap::Window::all()
-                .unwrap_or_default()
-                .iter()
-                .map(|window| window.id().unwrap())
-                .collect::<Vec<u32>>()
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        let blacklist = blacklist.unwrap_or_default();
+        let targets = snow_shot_window::list_windows(&blacklist).map_err(|error| {
+            log::warn!("[get_window_elements] failed to enumerate windows: {error}");
+        })?;
 
-    #[cfg(target_os = "macos")]
-    let window_size_scale: f32;
-    #[cfg(not(target_os = "macos"))]
-    let window_size_scale = 1.0f32;
+        return Ok(targets
+            .into_iter()
+            .map(|target| {
+                let rect = target.rect();
+                WindowElement {
+                    element_rect: ElementRect {
+                        min_x: rect.min_x(),
+                        min_y: rect.min_y(),
+                        max_x: rect.max_x(),
+                        max_y: rect.max_y(),
+                    },
+                    window_id: target.id(),
+                }
+            })
+            .collect());
+    }
 
     #[cfg(target_os = "macos")]
     {
-        // macOS 下窗口基于逻辑像素，这里统一转为物理像素
-        window_size_scale = window.scale_factor().unwrap_or(1.0) as f32;
-    }
+        // macOS 下窗口基于逻辑像素，这里统一转为物理像素。
+        let window_size_scale = window.scale_factor().unwrap_or(1.0) as f32;
+        let window_ids = xcap::Window::all()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|window| window.id().ok())
+            .collect::<Vec<_>>();
 
-    let rect_list = windows
-        .par_iter()
-        .filter_map(|window_hwnd| {
-            let window = {
-                #[cfg(target_os = "windows")]
-                {
-                    let w = xcap::ImplWindow::new(HWND(*window_hwnd as *mut c_void));
-
-                    // 黑名单过滤：检查应用名是否在黑名单中
-                    if let Some(ref bl) = blacklist {
-                        if let Ok(app_name) = w.app_name() {
-                            let app_name_lower = app_name.to_lowercase();
-                            for item in bl {
-                                if app_name_lower.contains(&item.to_lowercase()) {
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-
-                    w
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    xcap::ImplWindow::new(*window_hwnd)
-                }
-            };
-
-            #[cfg(target_os = "macos")]
-            let cf_dict = match window.window_cf_dictionary() {
-                Ok(cf_dict) => cf_dict,
-                Err(_) => return None,
-            };
-
-            #[cfg(target_os = "windows")]
-            {
-                if window.is_minimized().unwrap_or(true) {
-                    return None;
-                }
-            }
-
-            #[cfg(target_os = "macos")]
-            {
+        let rect_list = window_ids
+            .par_iter()
+            .filter_map(|window_id| {
+                let window = xcap::ImplWindow::new(*window_id);
+                let cf_dict = window.window_cf_dictionary().ok()?;
                 if xcap::ImplWindow::is_minimized_by_cf_dictionary(cf_dict.as_ref()).unwrap_or(true)
                 {
                     return None;
                 }
-            }
 
-            let window_title;
-            #[cfg(target_os = "windows")]
-            {
-                window_title = window.title().unwrap_or_default();
-            }
-            #[cfg(target_os = "macos")]
-            {
-                window_title = match xcap::ImplWindow::title_by_cf_dictionary(cf_dict.as_ref()) {
-                    Ok(title) => title,
-                    Err(_) => return None,
-                };
-
-                if window_title.eq("Notification Center") || window_title.eq("Dock") {
+                let window_title =
+                    xcap::ImplWindow::title_by_cf_dictionary(cf_dict.as_ref()).ok()?;
+                if window_title == "Notification Center" || window_title == "Dock" {
+                    return None;
+                }
+                if window_title == "Cursor"
+                    && window.app_name().unwrap_or_default() == "Window Server"
+                {
                     return None;
                 }
 
-                if window_title.eq("Cursor") {
-                    if window.app_name().unwrap_or_default().eq("Window Server") {
-                        return None;
-                    }
-                }
-            }
-
-            let window_rect: ElementRect;
-            let window_id: u32;
-            let x: i32;
-            let y: i32;
-            let width: i32;
-            let height: i32;
-
-            #[cfg(target_os = "windows")]
-            {
-                if window_title.eq("Shell Handwriting Canvas") {
-                    return None;
-                }
-
-                let window_info = match window.get_window_info() {
-                    Ok(window_info) => window_info,
-                    Err(_) => return None,
+                let cg_rect = xcap::ImplWindow::cg_rect_by_cf_dictionary(cf_dict.as_ref()).ok()?;
+                let window_rect = ElementRect {
+                    min_x: cg_rect.origin.x as i32,
+                    min_y: cg_rect.origin.y as i32,
+                    max_x: (cg_rect.origin.x + cg_rect.size.width) as i32,
+                    max_y: (cg_rect.origin.y + cg_rect.size.height) as i32,
                 };
 
-                x = window_info.rcClient.left;
-                y = window_info.rcClient.top;
-                width = window_info.rcClient.right - window_info.rcClient.left;
-                height = window_info.rcClient.bottom - window_info.rcClient.top;
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                let cg_rect = match xcap::ImplWindow::cg_rect_by_cf_dictionary(cf_dict.as_ref()) {
-                    Ok(window_rect) => window_rect,
-                    Err(_) => return None,
-                };
-
-                x = cg_rect.origin.x as i32;
-                y = cg_rect.origin.y as i32;
-                width = cg_rect.size.width as i32;
-                height = cg_rect.size.height as i32;
-            }
-
-            window_id = match window.id() {
-                Ok(id) => id,
-                Err(_) => return None,
-            };
-
-            window_rect = ElementRect {
-                min_x: x,
-                min_y: y,
-                max_x: x + width,
-                max_y: y + height,
-            };
-
-            Some(WindowElement {
-                element_rect: window_rect.scale(window_size_scale),
-                window_id,
+                Some(WindowElement {
+                    element_rect: window_rect.scale(window_size_scale),
+                    window_id: window.id().ok()?,
+                })
             })
-        })
-        .collect::<Vec<WindowElement>>();
+            .collect();
 
-    Ok(rect_list)
+        return Ok(rect_list);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    Err(())
 }
 
 pub async fn switch_always_on_top(#[allow(unused_variables)] window_id: u32) -> bool {

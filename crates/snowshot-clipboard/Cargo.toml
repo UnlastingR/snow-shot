@@ -11,3 +11,6 @@ rayon = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 clipboard-win = { workspace = true }
+
+[dev-dependencies]
+snow-shot-capture = { workspace = true }

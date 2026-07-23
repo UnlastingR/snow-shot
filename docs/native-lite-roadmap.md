@@ -113,7 +113,10 @@ apps/
 - macOS 原生编译、权限和多显示器实测暂缓，后续统一在 Apple runner 完成。
 - 已新增 `crates/snowshot-clipboard`，承载 Windows `CF_DIB` 编码、图片写入和 SharedBuffer RGBA 载荷校验。
 - DIB 构建不再使用未初始化缓冲区或裸指针，Tauri 层只保留 IPC/SharedBuffer 适配。
-- Windows 下一步抽离窗口识别 service，并补截图到剪贴板的集成边界测试。
+- 已新增 `crates/snowshot-window`，承载 Windows 可见窗口枚举、客户区边界和应用黑名单过滤。
+- Tauri 窗口列表 command 仅负责把 Core 结果转换为现有 IPC 数据结构。
+- 已补 `snowshot-capture` PNG 编码到 `snowshot-clipboard` DIB 编码的集成边界测试。
+- Windows 下一步将全局快捷键、托盘与原生 Slint 截图入口接成最小可用闭环。
 
 ### Phase 2：Native Lite MVP
 

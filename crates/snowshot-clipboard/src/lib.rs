@@ -262,6 +262,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_png_from_capture_encoder() {
+        let image = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(1, 1, vec![10, 20, 30, 255]).unwrap(),
+        );
+        let png =
+            snow_shot_capture::encode_image(&image, snow_shot_capture::ImageEncoder::Png).unwrap();
+
+        let dib = encode_cf_dib_from_png(&png).unwrap();
+
+        assert_eq!(&dib[40..], &[30, 20, 10, 0]);
+    }
+
+    #[test]
     fn parses_valid_shared_buffer_payload() {
         let mut data = vec![1, 2, 3, 4];
         data.extend_from_slice(&1_u32.to_le_bytes());

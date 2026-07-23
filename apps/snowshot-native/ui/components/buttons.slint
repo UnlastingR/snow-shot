@@ -1,0 +1,66 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+
+export component SnowIconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> selected: false;
+    callback clicked();
+
+    width: SnowTheme.control-height;
+    height: SnowTheme.control-height;
+    border-radius: SnowTheme.radius-sm;
+    background: root.selected
+        ? SnowTheme.selected-bg
+        : hit.pressed
+            ? SnowTheme.pressed-bg
+            : hit.has-hover
+                ? SnowTheme.hover-bg
+                : transparent;
+
+    Text {
+        text: root.glyph;
+        color: SnowTheme.text-secondary;
+        font-size: SnowTheme.icon-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    hit := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SnowButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked();
+
+    height: SnowTheme.control-height;
+    min-width: 76px;
+    border-radius: SnowTheme.radius-sm;
+    border-width: root.primary ? 0px : 1px;
+    border-color: SnowTheme.border-strong;
+    background: root.primary
+        ? hit.pressed
+            ? SnowTheme.accent-pressed
+            : hit.has-hover
+                ? SnowTheme.accent-hover
+                : SnowTheme.accent
+        : hit.pressed
+            ? SnowTheme.pressed-bg
+            : hit.has-hover
+                ? SnowTheme.hover-bg
+                : SnowTheme.elevated-bg;
+
+    Text {
+        text: root.label;
+        color: root.primary ? SnowTheme.text-on-accent : SnowTheme.text-primary;
+        font-size: SnowTheme.body-size;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    hit := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}

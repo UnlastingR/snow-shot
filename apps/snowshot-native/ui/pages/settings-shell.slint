@@ -1,0 +1,74 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+import { SnowDivider, SnowSectionLabel } from "../components/foundations.slint";
+import { SnowIconButton } from "../components/buttons.slint";
+import { SnowNavItem } from "../components/navigation.slint";
+import { GeneralSettingsPage } from "general-settings-page.slint";
+
+export component SettingsShell inherits Rectangle {
+    callback autostart-clicked();
+    callback close-behavior-clicked();
+    callback ocr-config-clicked();
+
+    background: SnowTheme.window-bg;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: SnowTheme.sidebar-width;
+            background: SnowTheme.sidebar-bg;
+
+            VerticalLayout {
+                padding-left: SnowTheme.space-3;
+                padding-right: SnowTheme.space-3;
+                padding-top: SnowTheme.space-3;
+                padding-bottom: SnowTheme.space-3;
+                spacing: SnowTheme.space-1;
+
+                HorizontalLayout {
+                    height: SnowTheme.topbar-height;
+                    spacing: SnowTheme.space-2;
+
+                    Text {
+                        text: "Snow Shot";
+                        color: SnowTheme.text-primary;
+                        font-size: SnowTheme.subtitle-size;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    SnowIconButton { glyph: "⋯"; }
+                }
+
+                SnowSectionLabel { label: "常用"; height: 28px; }
+                SnowNavItem { label: "截图"; }
+                SnowNavItem { label: "贴图"; }
+                SnowNavItem { label: "历史记录"; }
+
+                Rectangle { height: SnowTheme.space-3; background: transparent; }
+
+                SnowSectionLabel { label: "设置"; height: 28px; }
+                SnowNavItem { label: "常规"; selected: true; }
+                SnowNavItem { label: "快捷键"; }
+                SnowNavItem { label: "标注"; }
+                SnowNavItem { label: "OCR"; meta: "可选"; }
+                SnowNavItem { label: "保存"; }
+                SnowNavItem { label: "关于"; }
+
+                Rectangle { vertical-stretch: 1; background: transparent; }
+
+                SnowNavItem { label: "检查更新"; meta: "0.1.0"; }
+            }
+        }
+
+        SnowDivider {}
+
+        GeneralSettingsPage {
+            horizontal-stretch: 1;
+            autostart-clicked => { root.autostart-clicked(); }
+            close-behavior-clicked => { root.close-behavior-clicked(); }
+            ocr-config-clicked => { root.ocr-config-clicked(); }
+        }
+    }
+}

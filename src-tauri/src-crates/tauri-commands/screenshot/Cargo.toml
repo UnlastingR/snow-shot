@@ -20,6 +20,7 @@ snow-shot-webview = { workspace = true }
 snow-shot-global-state = { workspace = true }
 
 [target.'cfg(any(target_os = "windows"))'.dependencies]
+snow-shot-window = { workspace = true }
 webview2-com = "0.38.0"
 windows-core = { version = "0.61" }
 windows = { workspace = true }

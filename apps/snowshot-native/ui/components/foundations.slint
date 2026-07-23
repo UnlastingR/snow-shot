@@ -1,0 +1,16 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+
+export component SnowDivider inherits Rectangle {
+    width: 1px;
+    background: SnowTheme.border;
+}
+
+export component SnowSectionLabel inherits Text {
+    in property <string> label;
+
+    text: root.label;
+    color: SnowTheme.text-muted;
+    font-size: SnowTheme.caption-size;
+    font-weight: 600;
+    vertical-alignment: center;
+}

@@ -1,0 +1,99 @@
+import { SnowTheme } from "../theme/snow-theme.slint";
+import { SnowSettingsActionRow } from "../components/settings-rows.slint";
+
+export component GeneralSettingsPage inherits Rectangle {
+    callback autostart-clicked();
+    callback close-behavior-clicked();
+    callback ocr-config-clicked();
+
+    background: SnowTheme.surface-bg;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: SnowTheme.topbar-height;
+            background: SnowTheme.surface-bg;
+
+            HorizontalLayout {
+                padding-left: SnowTheme.space-6;
+                padding-right: SnowTheme.space-4;
+
+                Text {
+                    text: "常规";
+                    color: SnowTheme.text-primary;
+                    font-size: SnowTheme.subtitle-size;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: SnowTheme.border; }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: SnowTheme.surface-bg;
+
+            VerticalLayout {
+                padding-left: SnowTheme.space-6;
+                padding-right: SnowTheme.space-6;
+                padding-top: SnowTheme.space-6;
+                padding-bottom: SnowTheme.space-6;
+                spacing: SnowTheme.space-6;
+
+                VerticalLayout {
+                    spacing: SnowTheme.space-3;
+
+                    Text {
+                        text: "启动与行为";
+                        color: SnowTheme.text-primary;
+                        font-size: SnowTheme.title-size;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 1px; background: SnowTheme.border; }
+
+                    SnowSettingsActionRow {
+                        title: "开机启动";
+                        description: "登录系统后在托盘中启动 Snow Shot，不创建主窗口。";
+                        action-label: "启用";
+                        action-clicked => { root.autostart-clicked(); }
+                    }
+
+                    Rectangle { height: 1px; background: SnowTheme.border; }
+
+                    SnowSettingsActionRow {
+                        title: "关闭窗口时";
+                        description: "销毁设置窗口并保留托盘服务，避免隐藏窗口长期占用内存。";
+                        action-label: "退出到托盘";
+                        action-clicked => { root.close-behavior-clicked(); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: SnowTheme.space-3;
+
+                    Text {
+                        text: "OCR";
+                        color: SnowTheme.text-primary;
+                        font-size: SnowTheme.title-size;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 1px; background: SnowTheme.border; }
+
+                    SnowSettingsActionRow {
+                        title: "现有本地 OCR";
+                        description: "沿用当前 OcrService、ONNX Runtime 与 PP-OCRv4 模型路径，空闲后释放模型会话。";
+                        action-label: "配置";
+                        primary: true;
+                        action-clicked => { root.ocr-config-clicked(); }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; background: transparent; }
+            }
+        }
+    }
+}

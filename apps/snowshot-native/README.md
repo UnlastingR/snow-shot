@@ -11,8 +11,10 @@ cargo run
 
 ## 文件
 
-- `ui/snow-ui.slint`：主题 Token 与基础组件
-- `ui/app-window.slint`：设置窗口骨架
+- `ui/theme/`：颜色、间距、字号和尺寸 Token
+- `ui/components/`：无业务状态的按钮、导航、分隔线和设置行
+- `ui/pages/`：设置壳与页面组合，只向窗口层暴露业务 callback
+- `ui/app-window.slint`：窗口属性、页面挂载和 Rust callback 边界
 - `../../design/snow-ui.tokens.json`：框架无关的设计 Token
 - `../../docs/native-lite-design-system.md`：设计和交互规范
 

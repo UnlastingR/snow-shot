@@ -6882,6 +6882,7 @@ dependencies = [
  "clipboard-win",
  "image",
  "rayon",
+ "snow-shot-capture",
 ]
 
 [[package]]
@@ -7010,6 +7011,7 @@ dependencies = [
  "snow-shot-capture",
  "snow-shot-global-state",
  "snow-shot-webview",
+ "snow-shot-window",
  "tauri",
  "tokio",
  "webview2-com",
@@ -7046,6 +7048,15 @@ dependencies = [
  "webview2-com",
  "windows 0.61.3",
  "windows-core 0.61.2",
+]
+
+[[package]]
+name = "snow-shot-window"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "windows 0.61.3",
+ "xcap",
 ]
 
 [[package]]
