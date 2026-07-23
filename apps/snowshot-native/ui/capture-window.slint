@@ -2,6 +2,7 @@ import { CaptureOverlayPage } from "pages/capture-overlay-page.slint";
 
 export component CaptureWindow inherits Window {
     in-out property <image> frozen-frame;
+    in-out property <bool> presentation-active: false;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
@@ -34,6 +35,7 @@ export component CaptureWindow inherits Window {
 
     overlay := CaptureOverlayPage {
         frozen-frame: root.frozen-frame;
+        presentation-active: root.presentation-active;
         selection-confirmed(left, top, right, bottom) => {
             root.selection-confirmed(left, top, right, bottom);
         }

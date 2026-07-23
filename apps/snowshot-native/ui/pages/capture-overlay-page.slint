@@ -4,6 +4,7 @@ import { ResizeHandle } from "../components/resize-handle.slint";
 
 export component CaptureOverlayPage inherits Rectangle {
     in property <image> frozen-frame;
+    in property <bool> presentation-active;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
@@ -38,6 +39,7 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <bool> selection-visible: root.selecting || root.has-selection;
 
     background: transparent;
+    opacity: root.presentation-active ? 1 : 0;
     forward-focus: keyboard-focus;
 
     function update-cursor(x: length, y: length) {
@@ -143,6 +145,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     pointer-input := TouchArea {
+        enabled: root.presentation-active;
         mouse-cursor: crosshair;
 
         pointer-event(event) => {
@@ -174,40 +177,25 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if !root.selection-visible : Rectangle {
+    Rectangle {
         background: #0000006e;
     }
 
     if root.selection-visible : Rectangle {
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.selection-top;
-        background: #0000006e;
-    }
-
-    if root.selection-visible : Rectangle {
-        x: 0px;
+        x: root.selection-left;
         y: root.selection-top;
-        width: root.selection-left;
+        width: root.selection-width;
         height: root.selection-height;
-        background: #0000006e;
-    }
+        clip: true;
 
-    if root.selection-visible : Rectangle {
-        x: root.selection-right;
-        y: root.selection-top;
-        width: max(0px, root.width - root.selection-right);
-        height: root.selection-height;
-        background: #0000006e;
-    }
-
-    if root.selection-visible : Rectangle {
-        x: 0px;
-        y: root.selection-bottom;
-        width: root.width;
-        height: max(0px, root.height - root.selection-bottom);
-        background: #0000006e;
+        Image {
+            x: -root.selection-left;
+            y: -root.selection-top;
+            width: root.width;
+            height: root.height;
+            source: root.frozen-frame;
+            image-fit: fill;
+        }
     }
 
     if root.selection-visible : Rectangle {
@@ -220,7 +208,7 @@ export component CaptureOverlayPage inherits Rectangle {
         border-color: SnowTheme.focus-ring;
     }
 
-    if root.has-selection : TouchArea {
+    if root.presentation-active && root.has-selection : TouchArea {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
@@ -244,7 +232,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nwse-resize;
@@ -262,7 +250,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nesw-resize;
@@ -280,7 +268,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nesw-resize;
@@ -298,7 +286,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nwse-resize;
@@ -335,7 +323,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.has-selection : CaptureToolbar {
+    if root.presentation-active && root.has-selection : CaptureToolbar {
         x: min(
             root.width - self.width - SnowTheme.space-3,
             max(SnowTheme.space-3, root.selection-right - self.width),

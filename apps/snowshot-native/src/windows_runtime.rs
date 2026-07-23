@@ -3,15 +3,17 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, PhysicalPosition, PhysicalSize, Rgba8Pixel,
-    SharedPixelBuffer,
+    CloseRequestResponse, ComponentHandle, Image, PhysicalPosition, PhysicalSize, RenderingState,
+    Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use snow_shot_capture::PixelRect;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 
 use crate::capture_workflow::{
     CaptureWorkflowError, FrozenMonitorFrame, FrozenRegionFrame, capture_monitor_to_clipboard,
@@ -26,6 +28,8 @@ use crate::{AppTray, AppWindow, CaptureWindow};
 
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
+const CAPTURE_RETIRE_DELAY: Duration = Duration::from_millis(34);
+const ESCAPE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 #[cfg(test)]
 const PIN_MIN_WIDTH: f32 = 96.0;
 #[cfg(test)]
@@ -34,8 +38,19 @@ const PIN_MIN_HEIGHT: f32 = 64.0;
 const PIN_MAX_WIDTH: f32 = 4096.0;
 #[cfg(test)]
 const PIN_MAX_HEIGHT: f32 = 4096.0;
-type SharedFrame = Arc<Mutex<Option<FrozenMonitorFrame>>>;
+type SharedCaptureSession = Arc<CaptureSession>;
 type SharedPins = Rc<RefCell<PinCollection>>;
+type AfterRenderAction = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct CaptureSession {
+    busy: AtomicBool,
+    visible: AtomicBool,
+    finishing: AtomicBool,
+    frame: Mutex<Option<FrozenMonitorFrame>>,
+    after_render: Mutex<Option<AfterRenderAction>>,
+    render_notifier_available: AtomicBool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FloatPoint {
@@ -175,6 +190,7 @@ impl Drop for HotkeyRegistration {
 
 pub struct WindowsRuntime {
     _hotkeys: Option<HotkeyRegistration>,
+    _escape_timer: Timer,
 }
 
 impl WindowsRuntime {
@@ -182,32 +198,50 @@ impl WindowsRuntime {
         app.window()
             .on_close_requested(|| CloseRequestResponse::HideWindow);
 
-        let busy = Arc::new(AtomicBool::new(false));
-        let frame = Arc::new(Mutex::new(None));
+        let session = Arc::new(CaptureSession::default());
         let pins = Rc::new(RefCell::new(PinCollection::default()));
+        install_capture_render_notifier(capture, Arc::clone(&session));
 
-        bind_capture_callbacks(
-            app,
-            capture,
-            Arc::clone(&busy),
-            Arc::clone(&frame),
-            Rc::clone(&pins),
-        );
+        bind_capture_callbacks(app, capture, Arc::clone(&session), Rc::clone(&pins));
         bind_pin_visibility_callback(app, Rc::clone(&pins));
-        bind_app_callbacks(app, capture, Arc::clone(&busy), Arc::clone(&frame));
-        bind_tray_callbacks(app, tray, capture, Arc::clone(&busy), Arc::clone(&frame));
+        bind_app_callbacks(app, capture, Arc::clone(&session));
+        bind_tray_callbacks(app, tray, capture, Arc::clone(&session));
 
-        let hotkeys = register_global_hotkeys(app, capture, busy, frame);
+        let hotkeys = register_global_hotkeys(app, capture, Arc::clone(&session));
+        let escape_timer = watch_capture_escape(capture, session);
 
-        Self { _hotkeys: hotkeys }
+        Self {
+            _hotkeys: hotkeys,
+            _escape_timer: escape_timer,
+        }
     }
+}
+
+fn install_capture_render_notifier(capture: &CaptureWindow, session: SharedCaptureSession) {
+    let notifier_session = Arc::clone(&session);
+    let result = capture.window().set_rendering_notifier(move |state, _| {
+        if !matches!(state, RenderingState::AfterRendering) {
+            return;
+        }
+
+        let action = notifier_session
+            .after_render
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        if let Some(action) = action {
+            let _ = slint::invoke_from_event_loop(action);
+        }
+    });
+    session
+        .render_notifier_available
+        .store(result.is_ok(), Ordering::Release);
 }
 
 fn register_global_hotkeys(
     app: &AppWindow,
     capture: &CaptureWindow,
-    busy: Arc<AtomicBool>,
-    frame: SharedFrame,
+    session: SharedCaptureSession,
 ) -> Option<HotkeyRegistration> {
     let screenshot_hotkey = HotKey::new(Some(Modifiers::ALT), Code::F12);
     let pin_visibility_hotkey = HotKey::new(Some(Modifiers::ALT), Code::F11);
@@ -256,10 +290,9 @@ fn register_global_hotkeys(
         if event.id == screenshot_hotkey_id {
             let app_weak = app_weak.clone();
             let capture_weak = capture_weak.clone();
-            let busy = Arc::clone(&busy);
-            let frame = Arc::clone(&frame);
+            let session = Arc::clone(&session);
             let _ = slint::invoke_from_event_loop(move || {
-                request_region_capture(app_weak, capture_weak, busy, frame);
+                request_region_capture(app_weak, capture_weak, session);
             });
         } else if pin_visibility_hotkey_id.is_some_and(|id| event.id == id) {
             let app_weak = app_weak.clone();
@@ -280,19 +313,41 @@ fn register_global_hotkeys(
     Some(HotkeyRegistration { manager, hotkeys })
 }
 
+fn watch_capture_escape(capture: &CaptureWindow, session: SharedCaptureSession) -> Timer {
+    let timer = Timer::default();
+    let capture_weak = capture.as_weak();
+    let mut escape_was_down = false;
+    timer.start(TimerMode::Repeated, ESCAPE_POLL_INTERVAL, move || {
+        if !session.visible.load(Ordering::Acquire) {
+            escape_was_down = false;
+            return;
+        }
+
+        // SAFETY: GetAsyncKeyState reads process-independent keyboard state without mutation.
+        let escape_is_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } as u16 & 0x8000 != 0;
+        if escape_is_down
+            && !escape_was_down
+            && let Some(capture) = capture_weak.upgrade()
+        {
+            capture.invoke_cancelled();
+        }
+        escape_was_down = escape_is_down;
+    });
+    timer
+}
+
 fn bind_capture_callbacks(
     app: &AppWindow,
     capture: &CaptureWindow,
-    busy: Arc<AtomicBool>,
-    frame: SharedFrame,
+    session: SharedCaptureSession,
     pins: SharedPins,
 ) {
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let confirm_busy = Arc::clone(&busy);
-    let confirm_frame = Arc::clone(&frame);
+    let confirm_session = Arc::clone(&session);
     capture.on_selection_confirmed(move |left, top, right, bottom| {
-        let result = confirm_frame
+        let result = confirm_session
+            .frame
             .lock()
             .map_err(|_| "截图会话状态不可用。".to_string())
             .and_then(|guard| {
@@ -305,10 +360,9 @@ fn bind_capture_callbacks(
             });
 
         finish_region_capture(
-            &app_weak,
-            &capture_weak,
-            &confirm_busy,
-            &confirm_frame,
+            app_weak.clone(),
+            capture_weak.clone(),
+            Arc::clone(&confirm_session),
             match result {
                 Ok(summary) => format!(
                     "已复制 {}×{} 区域截图到剪贴板。按 {SCREENSHOT_SHORTCUT} 可再次截图。",
@@ -322,10 +376,10 @@ fn bind_capture_callbacks(
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let save_busy = Arc::clone(&busy);
-    let save_frame = Arc::clone(&frame);
+    let save_session = Arc::clone(&session);
     capture.on_selection_save_requested(move |left, top, right, bottom| {
-        let region = save_frame
+        let region = save_session
+            .frame
             .lock()
             .map_err(|_| "截图会话状态不可用。".to_string())
             .and_then(|guard| {
@@ -339,67 +393,73 @@ fn bind_capture_callbacks(
         let region = match region {
             Ok(region) => region,
             Err(error) => {
-                finish_region_capture(&app_weak, &capture_weak, &save_busy, &save_frame, error);
+                finish_region_capture(
+                    app_weak.clone(),
+                    capture_weak.clone(),
+                    Arc::clone(&save_session),
+                    error,
+                );
                 return;
             }
         };
 
-        if let Some(capture) = capture_weak.upgrade() {
-            let _ = capture.hide();
-        }
+        let dialog_app = app_weak.clone();
+        let dialog_capture = capture_weak.clone();
+        let dialog_session = Arc::clone(&save_session);
+        suspend_region_capture(capture_weak.clone(), Arc::clone(&save_session), move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG 图片", &["png"])
+                .set_file_name("snow-shot.png")
+                .set_title("保存 Snow Shot 截图")
+                .save_file()
+            else {
+                resume_region_capture(
+                    dialog_app,
+                    dialog_capture,
+                    dialog_session,
+                    "已取消保存，当前选区仍可继续处理。",
+                );
+                return;
+            };
 
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG 图片", &["png"])
-            .set_file_name("snow-shot.png")
-            .set_title("保存 Snow Shot 截图")
-            .save_file()
-        else {
-            resume_region_capture(
-                &app_weak,
-                &capture_weak,
-                &save_busy,
-                &save_frame,
-                "已取消保存，当前选区仍可继续处理。",
-            );
-            return;
-        };
+            let result = dialog_session
+                .frame
+                .lock()
+                .map_err(|_| "截图会话状态不可用。".to_string())
+                .and_then(|guard| {
+                    let frame = guard.as_ref().ok_or_else(|| {
+                        format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。")
+                    })?;
+                    save_frozen_region_to_path(frame, region, &path)
+                        .map_err(|error| error.to_string())
+                });
 
-        let result = save_frame
-            .lock()
-            .map_err(|_| "截图会话状态不可用。".to_string())
-            .and_then(|guard| {
-                let frame = guard
-                    .as_ref()
-                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
-                save_frozen_region_to_path(frame, region, &path).map_err(|error| error.to_string())
-            });
-
-        match result {
-            Ok(summary) => finish_region_capture(
-                &app_weak,
-                &capture_weak,
-                &save_busy,
-                &save_frame,
-                format!(
-                    "已保存 {}×{} 区域截图到 {}。",
-                    summary.width(),
-                    summary.height(),
-                    path.display()
+            match result {
+                Ok(summary) => finish_region_capture(
+                    dialog_app,
+                    dialog_capture,
+                    dialog_session,
+                    format!(
+                        "已保存 {}×{} 区域截图到 {}。",
+                        summary.width(),
+                        summary.height(),
+                        path.display()
+                    ),
                 ),
-            ),
-            Err(error) => {
-                resume_region_capture(&app_weak, &capture_weak, &save_busy, &save_frame, &error)
+                Err(error) => {
+                    resume_region_capture(dialog_app, dialog_capture, dialog_session, &error)
+                }
             }
-        }
+        });
     });
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let pin_busy = Arc::clone(&busy);
-    let pin_frame = Arc::clone(&frame);
+    let pin_session = Arc::clone(&session);
     let presented_pins = Rc::clone(&pins);
     capture.on_selection_pin_requested(move |left, top, right, bottom| {
-        let result = pin_frame
+        let result = pin_session
+            .frame
             .lock()
             .map_err(|_| "截图会话状态不可用。".to_string())
             .and_then(|guard| {
@@ -425,10 +485,9 @@ fn bind_capture_callbacks(
 
         match result {
             Ok((width, height)) => finish_region_capture(
-                &app_weak,
-                &capture_weak,
-                &pin_busy,
-                &pin_frame,
+                app_weak.clone(),
+                capture_weak.clone(),
+                Arc::clone(&pin_session),
                 format!("已创建 {width}×{height} 置顶贴图。"),
             ),
             Err(error) => set_status(&app_weak, &error),
@@ -490,28 +549,22 @@ fn bind_capture_callbacks(
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let cancel_busy = Arc::clone(&busy);
-    let cancel_frame = Arc::clone(&frame);
+    let cancel_session = Arc::clone(&session);
     capture.on_cancelled(move || {
         finish_region_capture(
-            &app_weak,
-            &capture_weak,
-            &cancel_busy,
-            &cancel_frame,
+            app_weak.clone(),
+            capture_weak.clone(),
+            Arc::clone(&cancel_session),
             "已取消区域截图。".to_string(),
         );
     });
 
-    let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
     capture.window().on_close_requested(move || {
         if let Some(capture) = capture_weak.upgrade() {
-            capture.set_frozen_frame(Image::default());
+            capture.invoke_cancelled();
         }
-        clear_frame(&frame);
-        busy.store(false, Ordering::Release);
-        set_status(&app_weak, "已取消区域截图。");
-        CloseRequestResponse::HideWindow
+        CloseRequestResponse::KeepWindowShown
     });
 }
 
@@ -522,21 +575,11 @@ fn bind_pin_visibility_callback(app: &AppWindow, pins: SharedPins) {
     });
 }
 
-fn bind_app_callbacks(
-    app: &AppWindow,
-    capture: &CaptureWindow,
-    busy: Arc<AtomicBool>,
-    frame: SharedFrame,
-) {
+fn bind_app_callbacks(app: &AppWindow, capture: &CaptureWindow, session: SharedCaptureSession) {
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
     app.on_capture_clicked(move || {
-        request_region_capture(
-            app_weak.clone(),
-            capture_weak.clone(),
-            Arc::clone(&busy),
-            Arc::clone(&frame),
-        );
+        request_region_capture(app_weak.clone(), capture_weak.clone(), Arc::clone(&session));
     });
 
     let app_weak = app.as_weak();
@@ -559,27 +602,25 @@ fn bind_tray_callbacks(
     app: &AppWindow,
     tray: &AppTray,
     capture: &CaptureWindow,
-    busy: Arc<AtomicBool>,
-    frame: SharedFrame,
+    session: SharedCaptureSession,
 ) {
     let app_weak = app.as_weak();
     tray.on_open_settings(move || show_settings(&app_weak));
 
     let app_weak = app.as_weak();
     let capture_weak = capture.as_weak();
-    let capture_busy = Arc::clone(&busy);
+    let capture_session = Arc::clone(&session);
     tray.on_capture_clicked(move || {
         request_region_capture(
             app_weak.clone(),
             capture_weak.clone(),
-            Arc::clone(&capture_busy),
-            Arc::clone(&frame),
+            Arc::clone(&capture_session),
         );
     });
 
     let app_weak = app.as_weak();
     tray.on_full_monitor_clicked(move || {
-        request_full_monitor_copy(app_weak.clone(), Arc::clone(&busy));
+        request_full_monitor_copy(app_weak.clone(), Arc::clone(&session));
     });
 
     tray.on_quit_requested(|| {
@@ -590,16 +631,14 @@ fn bind_tray_callbacks(
 fn request_region_capture(
     app_weak: slint::Weak<AppWindow>,
     capture_weak: slint::Weak<CaptureWindow>,
-    busy: Arc<AtomicBool>,
-    frame: SharedFrame,
+    session: SharedCaptureSession,
 ) {
-    if !begin_capture(&app_weak, &busy) {
+    if !begin_capture(&app_weak, &session) {
         return;
     }
 
     let worker_app = app_weak.clone();
-    let worker_busy = Arc::clone(&busy);
-    let worker_frame = Arc::clone(&frame);
+    let worker_session = Arc::clone(&session);
     let spawn_result = thread::Builder::new()
         .name("snowshot-region-capture".to_string())
         .spawn(move || {
@@ -607,44 +646,46 @@ fn request_region_capture(
 
             match result {
                 Ok(frozen) => {
-                    let event_busy = Arc::clone(&worker_busy);
-                    let event_frame = Arc::clone(&worker_frame);
+                    let event_session = Arc::clone(&worker_session);
                     let event_capture = capture_weak.clone();
                     let invoke_result = worker_app.upgrade_in_event_loop(move |app| {
                         let Some(capture) = event_capture.upgrade() else {
-                            event_busy.store(false, Ordering::Release);
+                            event_session.busy.store(false, Ordering::Release);
                             app.set_runtime_status("区域截图窗口已不可用。".into());
                             return;
                         };
 
-                        match present_frozen_frame(&capture, &frozen) {
+                        match present_frozen_frame(&capture, &frozen, &event_session) {
                             Ok(()) => {
-                                if let Ok(mut current) = event_frame.lock() {
+                                if let Ok(mut current) = event_session.frame.lock() {
                                     *current = Some(frozen);
                                     app.set_runtime_status(
                                         "区域截图中：拖动框选，可复制、保存或贴图；Esc 取消。"
                                             .into(),
                                     );
                                 } else {
-                                    event_busy.store(false, Ordering::Release);
+                                    event_session.visible.store(false, Ordering::Release);
+                                    event_session.busy.store(false, Ordering::Release);
+                                    capture.set_presentation_active(false);
                                     let _ = capture.hide();
                                     capture.set_frozen_frame(Image::default());
                                     app.set_runtime_status("截图会话状态不可用。".into());
                                 }
                             }
                             Err(error) => {
-                                event_busy.store(false, Ordering::Release);
+                                event_session.visible.store(false, Ordering::Release);
+                                event_session.busy.store(false, Ordering::Release);
                                 app.set_runtime_status(error.into());
                             }
                         }
                     });
 
                     if invoke_result.is_err() {
-                        worker_busy.store(false, Ordering::Release);
+                        worker_session.busy.store(false, Ordering::Release);
                     }
                 }
                 Err(error) => {
-                    worker_busy.store(false, Ordering::Release);
+                    worker_session.busy.store(false, Ordering::Release);
                     let status = error.to_string();
                     let _ = worker_app.upgrade_in_event_loop(move |app| {
                         app.set_runtime_status(status.into());
@@ -654,23 +695,23 @@ fn request_region_capture(
         });
 
     if let Err(error) = spawn_result {
-        busy.store(false, Ordering::Release);
+        session.busy.store(false, Ordering::Release);
         set_status(&app_weak, &format!("无法启动截图任务：{error}"));
     }
 }
 
-fn request_full_monitor_copy(app_weak: slint::Weak<AppWindow>, busy: Arc<AtomicBool>) {
-    if !begin_capture(&app_weak, &busy) {
+fn request_full_monitor_copy(app_weak: slint::Weak<AppWindow>, session: SharedCaptureSession) {
+    if !begin_capture(&app_weak, &session) {
         return;
     }
 
     let worker_app = app_weak.clone();
-    let worker_busy = Arc::clone(&busy);
+    let worker_session = Arc::clone(&session);
     let spawn_result = thread::Builder::new()
         .name("snowshot-monitor-copy".to_string())
         .spawn(move || {
             let result = capture_monitor_to_clipboard();
-            worker_busy.store(false, Ordering::Release);
+            worker_session.busy.store(false, Ordering::Release);
 
             let status = match result {
                 Ok(summary) => format!(
@@ -686,13 +727,14 @@ fn request_full_monitor_copy(app_weak: slint::Weak<AppWindow>, busy: Arc<AtomicB
         });
 
     if let Err(error) = spawn_result {
-        busy.store(false, Ordering::Release);
+        session.busy.store(false, Ordering::Release);
         set_status(&app_weak, &format!("无法启动截图任务：{error}"));
     }
 }
 
-fn begin_capture(app_weak: &slint::Weak<AppWindow>, busy: &AtomicBool) -> bool {
-    if busy
+fn begin_capture(app_weak: &slint::Weak<AppWindow>, session: &CaptureSession) -> bool {
+    if session
+        .busy
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
@@ -700,10 +742,16 @@ fn begin_capture(app_weak: &slint::Weak<AppWindow>, busy: &AtomicBool) -> bool {
         return false;
     }
 
+    session.visible.store(false, Ordering::Release);
+    session.finishing.store(false, Ordering::Release);
     true
 }
 
-fn present_frozen_frame(capture: &CaptureWindow, frame: &FrozenMonitorFrame) -> Result<(), String> {
+fn present_frozen_frame(
+    capture: &CaptureWindow,
+    frame: &FrozenMonitorFrame,
+    session: &SharedCaptureSession,
+) -> Result<(), String> {
     let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(frame.width(), frame.height());
     if pixels.make_mut_bytes().len() != frame.rgba().len() {
         return Err("冻结帧尺寸与像素数据不一致。".to_string());
@@ -718,10 +766,12 @@ fn present_frozen_frame(capture: &CaptureWindow, frame: &FrozenMonitorFrame) -> 
         .set_size(PhysicalSize::new(frame.width(), frame.height()));
     capture.set_frozen_frame(Image::from_rgba8(pixels));
     capture.invoke_prepare_selection();
+    capture.set_presentation_active(true);
     capture
         .show()
         .map_err(|error| format!("无法显示区域截图窗口：{error}"))?;
-    capture.invoke_focus_selection();
+    session.visible.store(true, Ordering::Release);
+    focus_capture_window(capture.as_weak(), Arc::clone(session));
 
     Ok(())
 }
@@ -1026,50 +1076,139 @@ fn scale_rect_around_point(
 }
 
 fn finish_region_capture(
-    app_weak: &slint::Weak<AppWindow>,
-    capture_weak: &slint::Weak<CaptureWindow>,
-    busy: &AtomicBool,
-    frame: &SharedFrame,
+    app_weak: slint::Weak<AppWindow>,
+    capture_weak: slint::Weak<CaptureWindow>,
+    session: SharedCaptureSession,
     status: String,
 ) {
+    if session
+        .finishing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let was_visible = session.visible.swap(false, Ordering::AcqRel);
+    if was_visible && let Some(capture) = capture_weak.upgrade() {
+        capture.set_presentation_active(false);
+        run_after_capture_render(
+            &capture,
+            Arc::clone(&session),
+            Box::new(move || {
+                if let Some(capture) = capture_weak.upgrade() {
+                    let _ = capture.hide();
+                    capture.invoke_prepare_selection();
+                    capture.set_frozen_frame(Image::default());
+                }
+                complete_region_capture(&app_weak, &session, status);
+            }),
+        );
+        return;
+    }
+
     if let Some(capture) = capture_weak.upgrade() {
         let _ = capture.hide();
+        capture.set_presentation_active(false);
+        capture.invoke_prepare_selection();
         capture.set_frozen_frame(Image::default());
     }
-    clear_frame(frame);
-    busy.store(false, Ordering::Release);
-    set_status(app_weak, &status);
+    complete_region_capture(&app_weak, &session, status);
 }
 
 fn resume_region_capture(
-    app_weak: &slint::Weak<AppWindow>,
-    capture_weak: &slint::Weak<CaptureWindow>,
-    busy: &AtomicBool,
-    frame: &SharedFrame,
+    app_weak: slint::Weak<AppWindow>,
+    capture_weak: slint::Weak<CaptureWindow>,
+    session: SharedCaptureSession,
     status: &str,
 ) {
     let show_result = capture_weak
         .upgrade()
         .ok_or_else(|| "区域截图窗口已不可用。".to_string())
         .and_then(|capture| {
+            capture.set_presentation_active(true);
             capture
                 .show()
                 .map_err(|error| format!("无法恢复区域截图窗口：{error}"))?;
-            capture.invoke_focus_selection();
+            session.visible.store(true, Ordering::Release);
+            focus_capture_window(capture.as_weak(), Arc::clone(&session));
             Ok(())
         });
 
     if let Err(error) = show_result {
-        clear_frame(frame);
-        busy.store(false, Ordering::Release);
-        set_status(app_weak, &error);
+        clear_frame(&session);
+        session.busy.store(false, Ordering::Release);
+        set_status(&app_weak, &error);
     } else {
-        set_status(app_weak, status);
+        set_status(&app_weak, status);
     }
 }
 
-fn clear_frame(frame: &SharedFrame) {
-    if let Ok(mut current) = frame.lock() {
+fn suspend_region_capture(
+    capture_weak: slint::Weak<CaptureWindow>,
+    session: SharedCaptureSession,
+    after_hidden: impl FnOnce() + Send + 'static,
+) {
+    let was_visible = session.visible.swap(false, Ordering::AcqRel);
+    if was_visible && let Some(capture) = capture_weak.upgrade() {
+        capture.set_presentation_active(false);
+        run_after_capture_render(
+            &capture,
+            session,
+            Box::new(move || {
+                if let Some(capture) = capture_weak.upgrade() {
+                    let _ = capture.hide();
+                }
+                after_hidden();
+            }),
+        );
+    } else {
+        after_hidden();
+    }
+}
+
+fn run_after_capture_render(
+    capture: &CaptureWindow,
+    session: SharedCaptureSession,
+    action: AfterRenderAction,
+) {
+    let mut action = Some(action);
+    if session.render_notifier_available.load(Ordering::Acquire)
+        && let Ok(mut pending) = session.after_render.lock()
+    {
+        *pending = action.take();
+    }
+    capture.window().request_redraw();
+
+    if let Some(action) = action {
+        Timer::single_shot(CAPTURE_RETIRE_DELAY, action);
+    }
+}
+
+fn focus_capture_window(capture_weak: slint::Weak<CaptureWindow>, session: SharedCaptureSession) {
+    Timer::single_shot(Duration::from_millis(1), move || {
+        if session.visible.load(Ordering::Acquire)
+            && let Some(capture) = capture_weak.upgrade()
+        {
+            capture.invoke_focus_selection();
+            capture.window().request_redraw();
+        }
+    });
+}
+
+fn complete_region_capture(
+    app_weak: &slint::Weak<AppWindow>,
+    session: &CaptureSession,
+    status: String,
+) {
+    clear_frame(session);
+    session.finishing.store(false, Ordering::Release);
+    session.busy.store(false, Ordering::Release);
+    set_status(app_weak, &status);
+}
+
+fn clear_frame(session: &CaptureSession) {
+    if let Ok(mut current) = session.frame.lock() {
         current.take();
     }
 }

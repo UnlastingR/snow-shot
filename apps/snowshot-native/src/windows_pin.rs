@@ -28,12 +28,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
-    GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IDC_SIZENESW, IDC_SIZENWSE, IsWindow, LoadCursorW,
-    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-    WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowLongPtrW, HTTRANSPARENT, IDC_ARROW, IDC_HAND, IDC_SIZENESW, IDC_SIZENWSE, IsWindow,
+    LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
+    WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Interface, PCWSTR, w};
 
@@ -41,9 +41,10 @@ use crate::resize_geometry::proportional_scale_from_delta;
 
 const PIN_CLASS_NAME: PCWSTR = w!("SnowShotDirectCompositionPin");
 const PIN_WINDOW_TITLE: PCWSTR = w!("Snow Shot 贴图");
-const SHADOW_EXTENT: i32 = 6;
+const SHADOW_EXTENT: i32 = 20;
 const SHADOW_OFFSET: f32 = 2.0;
 const SHADOW_BLUR: f32 = 6.0;
+const SHADOW_ALPHA: f32 = 0.28;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 const MIN_CONTENT_WIDTH: f32 = 96.0;
 const MIN_CONTENT_HEIGHT: f32 = 64.0;
@@ -352,7 +353,7 @@ impl PinComposition {
                 shadow_effect.SetRed2(0.0)?;
                 shadow_effect.SetGreen2(0.0)?;
                 shadow_effect.SetBlue2(0.0)?;
-                shadow_effect.SetAlpha2(0.40)?;
+                shadow_effect.SetAlpha2(SHADOW_ALPHA)?;
 
                 shadow_visual.SetContent(&image_surface)?;
                 shadow_visual.SetTransform(&scale_transform)?;
@@ -636,6 +637,10 @@ impl NativePinState {
         x >= left && x < left + size && y >= margin && y < margin + size
     }
 
+    fn is_in_shadow_margin(&self, x: f32, y: f32) -> bool {
+        x < 0.0 || y < 0.0 || x >= self.rect.content_width() || y >= self.rect.content_height()
+    }
+
     fn corner_at(&self, x: f32, y: f32) -> Option<ResizeCorner> {
         let hit = self.metrics.corner_hit_size as f32;
         let content_width = self.rect.content_width();
@@ -828,6 +833,18 @@ unsafe extern "system" fn pin_window_proc(
     }
 
     match message {
+        WM_NCHITTEST => {
+            if let Some(point) = screen_cursor_position() {
+                // SAFETY: GWLP_USERDATA owns this immutable state for the message duration.
+                let state = unsafe { &*state_ptr };
+                let (x, y) = state.client_point(point);
+                if state.is_in_shadow_margin(x, y) {
+                    return LRESULT(HTTRANSPARENT as isize);
+                }
+            }
+            // SAFETY: content-area hit testing uses the standard client result.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_LBUTTONDOWN => {
             if let Some(point) = screen_cursor_position() {
                 // SAFETY: GWLP_USERDATA owns this unique Box; the borrow ends before SetCapture.
@@ -1183,8 +1200,16 @@ mod tests {
         // SAFETY: hwnd is live and rect is writable for this call.
         unsafe { GetWindowRect(hwnd, &mut rect) }
             .map_err(|error| format!("无法读取测试贴图尺寸：{error}"))?;
-        assert_eq!(rect.right - rect.left, 562);
-        assert_eq!(rect.bottom - rect.top, 319);
+        let final_content_width = 320.0 + 59.0 * 4.0;
+        let final_content_height = final_content_width * SOURCE_HEIGHT as f32 / SOURCE_WIDTH as f32;
+        assert_eq!(
+            rect.right - rect.left,
+            (final_content_width + super::SHADOW_EXTENT as f32).round() as i32
+        );
+        assert_eq!(
+            rect.bottom - rect.top,
+            (final_content_height + super::SHADOW_EXTENT as f32).round() as i32
+        );
         Ok(())
     }
 
