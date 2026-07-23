@@ -5,6 +5,7 @@ export component ResizeHandle inherits Rectangle {
     in property <float> idle-opacity: 1;
     callback drag-started(float, float);
     callback drag-moved(float, float, bool, bool);
+    callback drag-ended();
 
     private property <bool> dragging: false;
 
@@ -34,8 +35,10 @@ export component ResizeHandle inherits Rectangle {
                 );
             }
 
-            if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+            if ((event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)
+                    && root.dragging) {
                 root.dragging = false;
+                root.drag-ended();
             }
         }
     }

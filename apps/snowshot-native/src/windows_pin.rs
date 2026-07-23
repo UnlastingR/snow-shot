@@ -41,7 +41,9 @@ use crate::resize_geometry::proportional_scale_from_delta;
 
 const PIN_CLASS_NAME: PCWSTR = w!("SnowShotDirectCompositionPin");
 const PIN_WINDOW_TITLE: PCWSTR = w!("Snow Shot 贴图");
-const SHADOW_EXTENT: i32 = 20;
+const SHADOW_BASE_EXTENT: f32 = 20.0;
+const SHADOW_MIN_EXTENT: f32 = 2.0;
+const SHADOW_MAX_EXTENT: f32 = 40.0;
 const SHADOW_OFFSET: f32 = 2.0;
 const SHADOW_BLUR: f32 = 6.0;
 const SHADOW_ALPHA: f32 = 0.28;
@@ -104,8 +106,13 @@ impl PinCompositor {
 
         ensure_pin_class()?;
         let instance = module_instance()?;
-        let window_width = frame.display_width.saturating_add(SHADOW_EXTENT as u32);
-        let window_height = frame.display_height.saturating_add(SHADOW_EXTENT as u32);
+        let initial_shadow_extent = SHADOW_BASE_EXTENT;
+        let window_width = frame
+            .display_width
+            .saturating_add(initial_shadow_extent.ceil() as u32);
+        let window_height = frame
+            .display_height
+            .saturating_add(initial_shadow_extent.ceil() as u32);
 
         // SAFETY: class registration and all pointers passed here remain valid for the call.
         let hwnd = unsafe {
@@ -136,9 +143,12 @@ impl PinCompositor {
                     top: frame.origin_y as f32,
                     width: window_width as f32,
                     height: window_height as f32,
+                    shadow_extent: initial_shadow_extent,
                 },
                 source_width: frame.source_width as f32,
                 source_height: frame.source_height as f32,
+                base_content_width: frame.display_width as f32,
+                base_content_height: frame.display_height as f32,
                 metrics,
                 composition,
                 interaction: None,
@@ -302,10 +312,10 @@ struct PinComposition {
     _target: IDCompositionTarget,
     _root: IDCompositionVisual,
     _image_visual: IDCompositionVisual,
-    shadow_visual: IDCompositionVisual,
+    _shadow_visual: IDCompositionVisual,
     close_visual: IDCompositionVisual,
     scale_transform: IDCompositionScaleTransform,
-    shadow_effect: IDCompositionShadowEffect,
+    _shadow_effect: IDCompositionShadowEffect,
     close_effect: IDCompositionEffectGroup,
     _image_surface: IDCompositionSurface,
     _close_surface: IDCompositionSurface,
@@ -345,11 +355,17 @@ impl PinComposition {
         // SAFETY: effect groups are compositor-owned scalar property containers.
         let close_effect = unsafe { compositor.dcomp_device.CreateEffectGroup() }
             .map_err(|error| format!("无法创建关闭按钮透明度效果：{error}"))?;
+        let initial_scale_x = (frame.display_width as f32 / frame.source_width as f32).max(0.001);
+        let initial_scale_y = (frame.display_height as f32 / frame.source_height as f32).max(0.001);
+        let initial_shadow_scale = initial_scale_x.min(initial_scale_y);
+        let shadow_local_offset_x = SHADOW_OFFSET / initial_scale_x;
+        let shadow_local_offset_y = SHADOW_OFFSET / initial_scale_y;
+        let shadow_local_blur = SHADOW_BLUR / initial_shadow_scale;
 
         let configure_visual_tree = || -> windows::core::Result<()> {
             // SAFETY: all surfaces, visuals, transforms and effects share the same DComp device.
             unsafe {
-                shadow_effect.SetStandardDeviation2(SHADOW_BLUR)?;
+                shadow_effect.SetStandardDeviation2(shadow_local_blur)?;
                 shadow_effect.SetRed2(0.0)?;
                 shadow_effect.SetGreen2(0.0)?;
                 shadow_effect.SetBlue2(0.0)?;
@@ -358,6 +374,8 @@ impl PinComposition {
                 shadow_visual.SetContent(&image_surface)?;
                 shadow_visual.SetTransform(&scale_transform)?;
                 shadow_visual.SetEffect(&shadow_effect)?;
+                shadow_visual.SetOffsetX2(shadow_local_offset_x)?;
+                shadow_visual.SetOffsetY2(shadow_local_offset_y)?;
 
                 image_visual.SetContent(&image_surface)?;
                 image_visual.SetTransform(&scale_transform)?;
@@ -384,10 +402,10 @@ impl PinComposition {
             _target: target,
             _root: root,
             _image_visual: image_visual,
-            shadow_visual,
+            _shadow_visual: shadow_visual,
             close_visual,
             scale_transform,
-            shadow_effect,
+            _shadow_effect: shadow_effect,
             close_effect,
             _image_surface: image_surface,
             _close_surface: close_surface,
@@ -404,10 +422,6 @@ impl PinComposition {
     fn set_layout(&self, content_width: f32, content_height: f32) -> Result<(), String> {
         let scale_x = (content_width / self.source_width).max(0.001);
         let scale_y = (content_height / self.source_height).max(0.001);
-        let shadow_scale = scale_x.min(scale_y).max(0.001);
-        let shadow_local_offset_x = SHADOW_OFFSET / scale_x;
-        let shadow_local_offset_y = SHADOW_OFFSET / scale_y;
-        let shadow_local_blur = SHADOW_BLUR / shadow_scale;
         let close_x =
             (content_width - self.metrics.close_size as f32 - self.metrics.close_margin as f32)
                 .max(0.0);
@@ -417,10 +431,6 @@ impl PinComposition {
             unsafe {
                 self.scale_transform.SetScaleX2(scale_x)?;
                 self.scale_transform.SetScaleY2(scale_y)?;
-                self.shadow_visual.SetOffsetX2(shadow_local_offset_x)?;
-                self.shadow_visual.SetOffsetY2(shadow_local_offset_y)?;
-                self.shadow_effect
-                    .SetStandardDeviation2(shadow_local_blur)?;
                 self.close_visual.SetOffsetX2(close_x)?;
                 self.close_visual.SetOffsetY2(close_y)?;
             }
@@ -462,6 +472,8 @@ struct NativePinState {
     rect: ScreenRect,
     source_width: f32,
     source_height: f32,
+    base_content_width: f32,
+    base_content_height: f32,
     metrics: PinMetrics,
     composition: PinComposition,
     interaction: Option<PointerInteraction>,
@@ -517,6 +529,8 @@ impl NativePinState {
                         point,
                         corner,
                         self.source_width / self.source_height,
+                        self.base_content_width,
+                        self.base_content_height,
                     );
                     let _ = self.apply_rect(rect);
                 }
@@ -571,16 +585,23 @@ impl NativePinState {
             (current_content_height * factor).clamp(MIN_CONTENT_HEIGHT, MAX_CONTENT_HEIGHT);
         let applied_factor = (target_content_width / current_content_width)
             .min(target_content_height / current_content_height);
-        let width = current_content_width * applied_factor + SHADOW_EXTENT as f32;
-        let height = current_content_height * applied_factor + SHADOW_EXTENT as f32;
-        let relative_x = (point.x as f32 - self.rect.left) / self.rect.width.max(1.0);
-        let relative_y = (point.y as f32 - self.rect.top) / self.rect.height.max(1.0);
-        let rect = ScreenRect {
-            left: point.x as f32 - relative_x * width,
-            top: point.y as f32 - relative_y * height,
-            width,
-            height,
-        };
+        let content_width = current_content_width * applied_factor;
+        let content_height = current_content_height * applied_factor;
+        let shadow_extent = shadow_extent_for_content(
+            content_width,
+            content_height,
+            self.base_content_width,
+            self.base_content_height,
+        );
+        let relative_x = (point.x as f32 - self.rect.left) / current_content_width.max(1.0);
+        let relative_y = (point.y as f32 - self.rect.top) / current_content_height.max(1.0);
+        let rect = ScreenRect::from_content(
+            point.x as f32 - relative_x * content_width,
+            point.y as f32 - relative_y * content_height,
+            content_width,
+            content_height,
+            shadow_extent,
+        );
         let _ = self.apply_rect(rect);
     }
 
@@ -741,24 +762,52 @@ struct ScreenRect {
     top: f32,
     width: f32,
     height: f32,
+    shadow_extent: f32,
 }
 
 impl ScreenRect {
-    fn right(self) -> f32 {
-        self.left + self.width
+    fn from_content(
+        left: f32,
+        top: f32,
+        content_width: f32,
+        content_height: f32,
+        shadow_extent: f32,
+    ) -> Self {
+        Self {
+            left,
+            top,
+            width: content_width + shadow_extent,
+            height: content_height + shadow_extent,
+            shadow_extent,
+        }
     }
 
-    fn bottom(self) -> f32 {
-        self.top + self.height
+    fn content_right(self) -> f32 {
+        self.left + self.content_width()
+    }
+
+    fn content_bottom(self) -> f32 {
+        self.top + self.content_height()
     }
 
     fn content_width(self) -> f32 {
-        (self.width - SHADOW_EXTENT as f32).max(1.0)
+        (self.width - self.shadow_extent).max(1.0)
     }
 
     fn content_height(self) -> f32 {
-        (self.height - SHADOW_EXTENT as f32).max(1.0)
+        (self.height - self.shadow_extent).max(1.0)
     }
+}
+
+fn shadow_extent_for_content(
+    content_width: f32,
+    content_height: f32,
+    base_content_width: f32,
+    base_content_height: f32,
+) -> f32 {
+    let relative_scale = (content_width / base_content_width.max(1.0))
+        .min(content_height / base_content_height.max(1.0));
+    (SHADOW_BASE_EXTENT * relative_scale).clamp(SHADOW_MIN_EXTENT, SHADOW_MAX_EXTENT)
 }
 
 #[derive(Clone, Copy)]
@@ -787,6 +836,8 @@ fn resize_from_corner(
     pointer: POINT,
     corner: ResizeCorner,
     aspect: f32,
+    base_content_width: f32,
+    base_content_height: f32,
 ) -> ScreenRect {
     let start_width = start_rect.content_width();
     let start_height = start_rect.content_height();
@@ -804,20 +855,25 @@ fn resize_from_corner(
     let scale = projected_scale.clamp(min_scale, max_scale);
     let content_width = (start_width * scale).clamp(MIN_CONTENT_WIDTH, MAX_CONTENT_WIDTH);
     let content_height = (content_width / aspect).clamp(MIN_CONTENT_HEIGHT, MAX_CONTENT_HEIGHT);
-    let width = content_width + SHADOW_EXTENT as f32;
-    let height = content_height + SHADOW_EXTENT as f32;
+    let shadow_extent = shadow_extent_for_content(
+        content_width,
+        content_height,
+        base_content_width,
+        base_content_height,
+    );
     let (left, top) = match corner {
-        ResizeCorner::TopLeft => (start_rect.right() - width, start_rect.bottom() - height),
-        ResizeCorner::TopRight => (start_rect.left, start_rect.bottom() - height),
-        ResizeCorner::BottomLeft => (start_rect.right() - width, start_rect.top),
+        ResizeCorner::TopLeft => (
+            start_rect.content_right() - content_width,
+            start_rect.content_bottom() - content_height,
+        ),
+        ResizeCorner::TopRight => (
+            start_rect.left,
+            start_rect.content_bottom() - content_height,
+        ),
+        ResizeCorner::BottomLeft => (start_rect.content_right() - content_width, start_rect.top),
         ResizeCorner::BottomRight => (start_rect.left, start_rect.top),
     };
-    ScreenRect {
-        left,
-        top,
-        width,
-        height,
-    }
+    ScreenRect::from_content(left, top, content_width, content_height, shadow_extent)
 }
 
 unsafe extern "system" fn pin_window_proc(
@@ -1089,6 +1145,7 @@ mod tests {
     use super::{
         PinCompositor, PinFrame, ResizeCorner, ScreenRect, destroy_pin_window, hide_pin_window,
         high_word_signed, resize_from_corner, rgba_to_premultiplied_bgra,
+        shadow_extent_for_content,
     };
     use windows::Win32::Foundation::{POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1120,23 +1177,31 @@ mod tests {
 
     #[test]
     fn native_corner_resize_preserves_content_aspect() {
-        let start = ScreenRect {
-            left: 100.0,
-            top: 100.0,
-            width: 402.0,
-            height: 202.0,
-        };
+        let start = ScreenRect::from_content(100.0, 100.0, 400.0, 200.0, 20.0);
         let resized = resize_from_corner(
             start,
             POINT { x: 100, y: 100 },
             POINT { x: 0, y: 50 },
             ResizeCorner::TopLeft,
             2.0,
+            400.0,
+            200.0,
         );
         let ratio = resized.content_width() / resized.content_height();
         assert!((ratio - 2.0).abs() < 0.001);
-        assert_eq!(resized.right(), start.right());
-        assert_eq!(resized.bottom(), start.bottom());
+        assert_eq!(resized.content_right(), start.content_right());
+        assert_eq!(resized.content_bottom(), start.content_bottom());
+    }
+
+    #[test]
+    fn shadow_extent_scales_with_pin_content() {
+        assert_eq!(shadow_extent_for_content(320.0, 180.0, 320.0, 180.0), 20.0);
+        assert_eq!(shadow_extent_for_content(160.0, 90.0, 320.0, 180.0), 10.0);
+        assert_eq!(shadow_extent_for_content(32.0, 18.0, 320.0, 180.0), 2.0);
+        assert_eq!(
+            shadow_extent_for_content(1_280.0, 720.0, 320.0, 180.0),
+            40.0
+        );
     }
 
     #[test]
@@ -1176,14 +1241,17 @@ mod tests {
         for step in 0..60 {
             let width = 320.0 + step as f32 * 4.0;
             let height = width * SOURCE_HEIGHT as f32 / SOURCE_WIDTH as f32;
+            let shadow_extent =
+                shadow_extent_for_content(width, height, SOURCE_WIDTH as f32, SOURCE_HEIGHT as f32);
             // SAFETY: the test is the sole mutator and the HWND remains guarded.
             unsafe {
-                (&mut *state_ptr).apply_rect(ScreenRect {
-                    left: -10_000.0,
-                    top: -10_000.0,
-                    width: width + super::SHADOW_EXTENT as f32,
-                    height: height + super::SHADOW_EXTENT as f32,
-                })?;
+                (&mut *state_ptr).apply_rect(ScreenRect::from_content(
+                    -10_000.0,
+                    -10_000.0,
+                    width,
+                    height,
+                    shadow_extent,
+                ))?;
             }
         }
 
@@ -1202,13 +1270,19 @@ mod tests {
             .map_err(|error| format!("无法读取测试贴图尺寸：{error}"))?;
         let final_content_width = 320.0 + 59.0 * 4.0;
         let final_content_height = final_content_width * SOURCE_HEIGHT as f32 / SOURCE_WIDTH as f32;
+        let final_shadow_extent = shadow_extent_for_content(
+            final_content_width,
+            final_content_height,
+            SOURCE_WIDTH as f32,
+            SOURCE_HEIGHT as f32,
+        );
         assert_eq!(
             rect.right - rect.left,
-            (final_content_width + super::SHADOW_EXTENT as f32).round() as i32
+            (final_content_width + final_shadow_extent).round() as i32
         );
         assert_eq!(
             rect.bottom - rect.top,
-            (final_content_height + super::SHADOW_EXTENT as f32).round() as i32
+            (final_content_height + final_shadow_extent).round() as i32
         );
         Ok(())
     }

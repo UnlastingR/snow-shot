@@ -24,6 +24,7 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> cursor-y: 0px;
     private property <bool> selecting: false;
     private property <bool> has-selection: false;
+    private property <bool> transforming: false;
     private property <length> transform-start-left: 0px;
     private property <length> transform-start-top: 0px;
     private property <length> transform-start-right: 0px;
@@ -81,6 +82,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     function begin-transform(pointer-x: length, pointer-y: length) {
+        root.transforming = true;
         root.transform-start-left = root.selection-left;
         root.transform-start-top = root.selection-top;
         root.transform-start-right = root.selection-right;
@@ -121,6 +123,7 @@ export component CaptureOverlayPage inherits Rectangle {
         root.cursor-y = 0px;
         root.selecting = false;
         root.has-selection = false;
+        root.transforming = false;
         keyboard-focus.focus();
     }
 
@@ -135,6 +138,7 @@ export component CaptureOverlayPage inherits Rectangle {
         root.cursor-y = bottom * 1px;
         root.selecting = false;
         root.has-selection = true;
+        root.transforming = false;
     }
 
     Image {
@@ -156,6 +160,7 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.cursor-y = root.anchor-y;
                 root.selecting = true;
                 root.has-selection = false;
+                root.transforming = false;
                 keyboard-focus.focus();
             }
 
@@ -181,7 +186,10 @@ export component CaptureOverlayPage inherits Rectangle {
         background: #0000006e;
     }
 
-    if root.selection-visible : Rectangle {
+    // Moving a clipped duplicate of the full-screen texture on every pointer event causes
+    // damage-region artifacts in transparent FemtoVG windows. Keep drag feedback lightweight
+    // and reveal the undimmed selection only after the geometry settles.
+    if root.has-selection && !root.transforming : Rectangle {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
@@ -229,6 +237,10 @@ export component CaptureOverlayPage inherits Rectangle {
                     false,
                 );
             }
+
+            if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.transforming = false;
+            }
         }
     }
 
@@ -248,6 +260,7 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
+        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -266,6 +279,7 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
+        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -284,6 +298,7 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
+        drag-ended => { root.transforming = false; }
     }
 
     if root.presentation-active && root.has-selection : ResizeHandle {
@@ -302,6 +317,7 @@ export component CaptureOverlayPage inherits Rectangle {
                 control,
             );
         }
+        drag-ended => { root.transforming = false; }
     }
 
     Rectangle {
