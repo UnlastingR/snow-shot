@@ -1,7 +1,9 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
-import { SnowSettingsActionRow } from "../components/settings-rows.slint";
+import { SnowSettingsActionRow, SnowSettingsRow } from "../components/settings-rows.slint";
 
 export component GeneralSettingsPage inherits Rectangle {
+    in property <string> runtime-status;
+    callback capture-clicked();
     callback autostart-clicked();
     callback close-behavior-clicked();
     callback ocr-config-clicked();
@@ -41,6 +43,34 @@ export component GeneralSettingsPage inherits Rectangle {
                 padding-top: SnowTheme.space-6;
                 padding-bottom: SnowTheme.space-6;
                 spacing: SnowTheme.space-6;
+
+                VerticalLayout {
+                    spacing: SnowTheme.space-3;
+
+                    Text {
+                        text: "截图";
+                        color: SnowTheme.text-primary;
+                        font-size: SnowTheme.title-size;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 1px; background: SnowTheme.border; }
+
+                    SnowSettingsActionRow {
+                        title: "鼠标所在显示器";
+                        description: "使用 F1，或从托盘菜单触发。截图完成后直接写入 Windows 剪贴板。";
+                        action-label: "截图并复制";
+                        primary: true;
+                        action-clicked => { root.capture-clicked(); }
+                    }
+
+                    Rectangle { height: 1px; background: SnowTheme.border; }
+
+                    SnowSettingsRow {
+                        title: "运行状态";
+                        description: root.runtime-status;
+                    }
+                }
 
                 VerticalLayout {
                     spacing: SnowTheme.space-3;

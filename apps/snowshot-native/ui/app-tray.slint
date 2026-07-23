@@ -1,0 +1,27 @@
+export component AppTray inherits SystemTrayIcon {
+    callback open-settings();
+    callback capture-clicked();
+    callback quit-requested();
+
+    icon: @image-url("../assets/tray-icon.svg");
+    title: "Snow Shot";
+    tooltip: "Snow Shot Native Lite · F1 截图并复制";
+
+    clicked => { root.open-settings(); }
+
+    Menu {
+        MenuItem {
+            title: "截图并复制（F1）";
+            activated => { root.capture-clicked(); }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "打开设置";
+            activated => { root.open-settings(); }
+        }
+        MenuItem {
+            title: "退出";
+            activated => { root.quit-requested(); }
+        }
+    }
+}

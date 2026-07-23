@@ -2,6 +2,8 @@ import { SnowTheme } from "theme/snow-theme.slint";
 import { SettingsShell } from "pages/settings-shell.slint";
 
 export component AppWindow inherits Window {
+    in-out property <string> runtime-status: "F1：截取鼠标所在显示器并复制到剪贴板";
+    callback capture-clicked();
     callback autostart-clicked();
     callback close-behavior-clicked();
     callback ocr-config-clicked();
@@ -12,6 +14,8 @@ export component AppWindow inherits Window {
     background: SnowTheme.window-bg;
 
     SettingsShell {
+        runtime-status: root.runtime-status;
+        capture-clicked => { root.capture-clicked(); }
         autostart-clicked => { root.autostart-clicked(); }
         close-behavior-clicked => { root.close-behavior-clicked(); }
         ocr-config-clicked => { root.ocr-config-clicked(); }

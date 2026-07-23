@@ -21,6 +21,7 @@ windows = { workspace = true, features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-capture = "2.0.0-alpha.7"
 widestring = "1.2.0"

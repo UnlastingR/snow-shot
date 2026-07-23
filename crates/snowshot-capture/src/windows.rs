@@ -1,4 +1,6 @@
 use image::DynamicImage;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::{CaptureError, PixelFormat, PixelRect};
 
@@ -30,6 +32,30 @@ pub fn capture_monitor(
     }
 }
 
+pub fn capture_monitor_under_cursor(
+    pixel_format: PixelFormat,
+) -> Result<DynamicImage, CaptureError> {
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }
+        .map_err(|error| CaptureError::Backend(format!("read cursor position: {error}")))?;
+
+    let monitor = match xcap::Monitor::from_point(cursor.x, cursor.y) {
+        Ok(monitor) => monitor,
+        Err(point_error) => xcap::Monitor::all()
+            .map_err(|error| {
+                CaptureError::Backend(format!(
+                    "find monitor at ({}, {}): {point_error}; enumerate monitors: {error}",
+                    cursor.x, cursor.y
+                ))
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CaptureError::Backend("no monitor is available".to_string()))?,
+    };
+
+    capture_monitor(&monitor, None, pixel_format)
+}
+
 pub fn capture_window(
     window: &xcap::Window,
     pixel_format: PixelFormat,
@@ -43,5 +69,19 @@ pub fn capture_window(
             DynamicImage::ImageRgba8(image).to_rgb8(),
         )),
         PixelFormat::Rgba8 => Ok(DynamicImage::ImageRgba8(image)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn captures_monitor_under_cursor_on_interactive_desktop() {
+        let image = capture_monitor_under_cursor(PixelFormat::Rgba8).unwrap();
+
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
     }
 }

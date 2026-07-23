@@ -116,7 +116,9 @@ apps/
 - 已新增 `crates/snowshot-window`，承载 Windows 可见窗口枚举、客户区边界和应用黑名单过滤。
 - Tauri 窗口列表 command 仅负责把 Core 结果转换为现有 IPC 数据结构。
 - 已补 `snowshot-capture` PNG 编码到 `snowshot-clipboard` DIB 编码的集成边界测试。
-- Windows 下一步将全局快捷键、托盘与原生 Slint 截图入口接成最小可用闭环。
+- Windows Native App 已接入 Slint 原生托盘、`F1` 全局快捷键和“截图并复制”按钮。
+- 已打通鼠标所在显示器采集到 Windows `CF_DIB` 剪贴板的首条真实闭环；关闭设置窗口后由托盘保持运行。
+- Windows 下一步实现区域选框和截图浮动工具栏，再接保存与贴图。
 
 ### Phase 2：Native Lite MVP
 

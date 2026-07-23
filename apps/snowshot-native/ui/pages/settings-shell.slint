@@ -5,6 +5,8 @@ import { SnowNavItem } from "../components/navigation.slint";
 import { GeneralSettingsPage } from "general-settings-page.slint";
 
 export component SettingsShell inherits Rectangle {
+    in property <string> runtime-status;
+    callback capture-clicked();
     callback autostart-clicked();
     callback close-behavior-clicked();
     callback ocr-config-clicked();
@@ -66,6 +68,8 @@ export component SettingsShell inherits Rectangle {
 
         GeneralSettingsPage {
             horizontal-stretch: 1;
+            runtime-status: root.runtime-status;
+            capture-clicked => { root.capture-clicked(); }
             autostart-clicked => { root.autostart-clicked(); }
             close-behavior-clicked => { root.close-behavior-clicked(); }
             ocr-config-clicked => { root.ocr-config-clicked(); }

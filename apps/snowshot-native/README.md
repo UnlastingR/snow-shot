@@ -1,6 +1,13 @@
 # Snow Shot Native Lite UI Preview
 
-这是 Snow UI 设计系统的原生 Slint 预览程序，目前只包含设置窗口骨架和基础组件，尚未接入截图、托盘、快捷键、OCR 或现有 Rust Core。
+这是 Snow UI 设计系统的原生 Slint 应用入口。Windows 版已接入第一条真实运行链路：
+
+- `F1` 全局快捷键截取鼠标所在显示器并写入 Windows 剪贴板。
+- 托盘菜单支持截图、打开设置和退出。
+- 关闭设置窗口时隐藏到托盘，不退出后台运行时。
+- 设置页“截图并复制”按钮复用同一 Rust workflow。
+
+当前仍未接入区域选框、标注画布、贴图、OCR 页面和配置持久化。
 
 ## 运行
 
@@ -14,7 +21,12 @@ cargo run
 - `ui/theme/`：颜色、间距、字号和尺寸 Token
 - `ui/components/`：无业务状态的按钮、导航、分隔线和设置行
 - `ui/pages/`：设置壳与页面组合，只向窗口层暴露业务 callback
+- `ui/native-app.slint`：Slint 编译入口，统一导出窗口和托盘
+- `ui/app-tray.slint`：系统托盘与菜单 callback
 - `ui/app-window.slint`：窗口属性、页面挂载和 Rust callback 边界
+- `assets/tray-icon.svg`：Native App 自有托盘资源，不依赖 Tauri 图标目录
+- `src/windows_runtime.rs`：Windows 快捷键、托盘 callback 和后台任务调度
+- `src/capture_workflow.rs`：截图 Core 到剪贴板 Core 的应用级 workflow
 - `../../design/snow-ui.tokens.json`：框架无关的设计 Token
 - `../../docs/native-lite-design-system.md`：设计和交互规范
 
@@ -28,8 +40,8 @@ cargo run
 
 ## 下一步
 
-1. 将现有截图服务抽成不依赖 Tauri 的 Rust API。
-2. 接入托盘和全局快捷键。
-3. 将截图结果交给原生窗口显示。
+1. 接入区域选框和截图浮动工具栏。
+2. 将截图结果交给原生窗口显示并支持保存。
+3. 接入贴图窗口。
 4. 迁移现有 `OcrService`、ONNX Runtime 与 PP-OCRv4 模型路径。
-5. 完成截图浮动工具栏和标注画布。
+5. 完成标注画布和撤销/重做。
