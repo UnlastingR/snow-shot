@@ -1,40 +1,40 @@
 use std::cell::RefCell;
-use std::ffi::c_void;
-use std::rc::{Rc, Weak as RcWeak};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{
     CloseRequestResponse, ComponentHandle, Image, PhysicalPosition, PhysicalSize, Rgba8Pixel,
     SharedPixelBuffer,
 };
 use snow_shot_capture::PixelRect;
-use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
-};
+use windows::Win32::Foundation::HWND;
 
 use crate::capture_workflow::{
     CaptureWorkflowError, FrozenMonitorFrame, FrozenRegionFrame, capture_monitor_to_clipboard,
     copy_frozen_region_to_clipboard, extract_frozen_region, freeze_monitor_under_cursor,
     save_frozen_region_to_path,
 };
-use crate::{AppTray, AppWindow, CaptureWindow, PinWindow};
+use crate::windows_pin::{
+    PinCompositor, PinFrame, destroy_pin_window, hide_pin_window, is_pin_window, show_pin_window,
+};
+use crate::{AppTray, AppWindow, CaptureWindow};
 
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
-const PIN_SHADOW_EXTENT_PHYSICAL: u32 = 2;
+#[cfg(test)]
 const PIN_MIN_WIDTH: f32 = 96.0;
+#[cfg(test)]
 const PIN_MIN_HEIGHT: f32 = 64.0;
+#[cfg(test)]
 const PIN_MAX_WIDTH: f32 = 4096.0;
+#[cfg(test)]
 const PIN_MAX_HEIGHT: f32 = 4096.0;
 type SharedFrame = Arc<Mutex<Option<FrozenMonitorFrame>>>;
 type SharedPins = Rc<RefCell<PinCollection>>;
-type WeakPins = RcWeak<RefCell<PinCollection>>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FloatPoint {
@@ -110,23 +110,32 @@ struct ResizeLimits {
     max_height: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PinResizeSession {
-    corner: ResizeCorner,
-    start_rect: FloatRect,
-}
-
 struct PinEntry {
-    id: u64,
-    window: PinWindow,
-    resize_session: Option<PinResizeSession>,
+    hwnd: HWND,
 }
 
 #[derive(Default)]
 struct PinCollection {
     entries: Vec<PinEntry>,
     hidden_by_shortcut: bool,
-    next_id: u64,
+    compositor: Option<Rc<PinCompositor>>,
+}
+
+impl PinCollection {
+    fn prune_closed(&mut self) {
+        self.entries.retain(|entry| is_pin_window(entry.hwnd));
+        if self.entries.is_empty() {
+            self.hidden_by_shortcut = false;
+        }
+    }
+}
+
+impl Drop for PinCollection {
+    fn drop(&mut self) {
+        for entry in self.entries.drain(..) {
+            destroy_pin_window(entry.hwnd);
+        }
+    }
 }
 
 struct HotkeyRegistration {
@@ -389,7 +398,7 @@ fn bind_capture_callbacks(
                 ))
             })
             .and_then(|(origin_x, origin_y, pinned)| {
-                create_pinned_frame(&app_weak, &presented_pins, pinned, origin_x, origin_y)
+                create_pinned_frame(&presented_pins, pinned, origin_x, origin_y)
             });
 
         match result {
@@ -480,150 +489,6 @@ fn bind_capture_callbacks(
         clear_frame(&frame);
         busy.store(false, Ordering::Release);
         set_status(&app_weak, "已取消区域截图。");
-        CloseRequestResponse::HideWindow
-    });
-}
-
-fn bind_pin_callbacks(
-    app_weak: slint::Weak<AppWindow>,
-    pin: &PinWindow,
-    pins: WeakPins,
-    pin_id: u64,
-) {
-    let pin_weak = pin.as_weak();
-    pin.on_move_requested(move |delta_x, delta_y| {
-        let Some(pin) = pin_weak.upgrade() else {
-            return;
-        };
-        let position = pin.window().position();
-        let scale = pin.window().scale_factor();
-        let delta_x = (delta_x * scale).round() as i32;
-        let delta_y = (delta_y * scale).round() as i32;
-        pin.window().set_position(PhysicalPosition::new(
-            position.x.saturating_add(delta_x),
-            position.y.saturating_add(delta_y),
-        ));
-    });
-
-    let pin_weak = pin.as_weak();
-    let resize_pins = pins.clone();
-    pin.on_resize_started(move |mode, _pointer_x, _pointer_y| {
-        let Some(pin) = pin_weak.upgrade() else {
-            return;
-        };
-        let Some(corner) = ResizeCorner::from_mode(mode) else {
-            return;
-        };
-        let Some(pins) = resize_pins.upgrade() else {
-            return;
-        };
-        if let Some(entry) = pins
-            .borrow_mut()
-            .entries
-            .iter_mut()
-            .find(|entry| entry.id == pin_id)
-        {
-            entry.resize_session = Some(PinResizeSession {
-                corner,
-                start_rect: pin_window_rect(&pin),
-            });
-        }
-    });
-
-    let resize_app_weak = app_weak.clone();
-    let pin_weak = pin.as_weak();
-    let resize_pins = pins.clone();
-    pin.on_resize_moved(move |_mode, pointer_x, pointer_y| {
-        let Some(pin) = pin_weak.upgrade() else {
-            return;
-        };
-        let session = resize_pins.upgrade().and_then(|pins| {
-            pins.borrow()
-                .entries
-                .iter()
-                .find(|entry| entry.id == pin_id)
-                .and_then(|entry| entry.resize_session)
-        });
-        let Some(session) = session else {
-            return;
-        };
-
-        let pointer = cursor_screen_position()
-            .unwrap_or_else(|| pin_pointer_screen(&pin, pointer_x, pointer_y));
-        let aspect = session.start_rect.width() / session.start_rect.height();
-        let resized = resize_rect_from_pointer(
-            session.start_rect,
-            pointer,
-            session.corner,
-            true,
-            false,
-            aspect,
-            ResizeLimits {
-                bounds: None,
-                min_width: PIN_MIN_WIDTH,
-                min_height: PIN_MIN_HEIGHT,
-                max_width: PIN_MAX_WIDTH,
-                max_height: PIN_MAX_HEIGHT,
-            },
-        );
-        apply_pin_rect(&pin, resized);
-        set_status(
-            &resize_app_weak,
-            &format!(
-                "贴图缩放为 {}×{}。",
-                resized.width().round() as u32,
-                resized.height().round() as u32
-            ),
-        );
-    });
-
-    let zoom_app_weak = app_weak.clone();
-    let pin_weak = pin.as_weak();
-    pin.on_zoom_requested(move |wheel_delta, pointer_x, pointer_y| {
-        let Some(pin) = pin_weak.upgrade() else {
-            return;
-        };
-        let factor = if wheel_delta > 0.0 {
-            1.1
-        } else if wheel_delta < 0.0 {
-            1.0 / 1.1
-        } else {
-            return;
-        };
-        let rect = pin_window_rect(&pin);
-        let anchor = cursor_screen_position()
-            .unwrap_or_else(|| pin_pointer_screen(&pin, pointer_x, pointer_y));
-        let scaled = scale_rect_around_point(
-            rect,
-            anchor,
-            factor,
-            ResizeLimits {
-                bounds: None,
-                min_width: PIN_MIN_WIDTH,
-                min_height: PIN_MIN_HEIGHT,
-                max_width: PIN_MAX_WIDTH,
-                max_height: PIN_MAX_HEIGHT,
-            },
-        );
-        apply_pin_rect(&pin, scaled);
-        set_status(
-            &zoom_app_weak,
-            &format!(
-                "贴图缩放为 {}×{}。",
-                scaled.width().round() as u32,
-                scaled.height().round() as u32
-            ),
-        );
-    });
-
-    let pin_weak = pin.as_weak();
-    let close_pins = pins.clone();
-    pin.on_close_clicked(move || close_pin(&pin_weak, &close_pins, pin_id));
-
-    let pin_weak = pin.as_weak();
-    let close_pins = pins;
-    pin.window().on_close_requested(move || {
-        close_pin(&pin_weak, &close_pins, pin_id);
         CloseRequestResponse::HideWindow
     });
 }
@@ -840,37 +705,35 @@ fn present_frozen_frame(capture: &CaptureWindow, frame: &FrozenMonitorFrame) -> 
 }
 
 fn create_pinned_frame(
-    app_weak: &slint::Weak<AppWindow>,
     pins: &SharedPins,
     frame: FrozenRegionFrame,
     origin_x: i32,
     origin_y: i32,
 ) -> Result<(u32, u32), String> {
-    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(frame.width(), frame.height());
-    if pixels.make_mut_bytes().len() != frame.rgba().len() {
-        return Err("贴图尺寸与像素数据不一致。".to_string());
-    }
-    pixels.make_mut_bytes().copy_from_slice(frame.rgba());
-
-    let pin = PinWindow::new().map_err(|error| format!("无法创建贴图窗口：{error}"))?;
-    let pin_id = {
+    let compositor = {
         let mut collection = pins.borrow_mut();
-        let id = collection.next_id;
-        collection.next_id = collection.next_id.wrapping_add(1);
-        id
+        collection.prune_closed();
+        if collection.compositor.is_none() {
+            collection.compositor = Some(PinCompositor::new()?);
+        }
+        Rc::clone(
+            collection
+                .compositor
+                .as_ref()
+                .expect("compositor initialized above"),
+        )
     };
-    bind_pin_callbacks(app_weak.clone(), &pin, Rc::downgrade(pins), pin_id);
 
     let (window_width, window_height) = fitted_pin_size(frame.width(), frame.height());
-    pin.set_pinned_frame(Image::from_rgba8(pixels));
-    pin.window()
-        .set_position(PhysicalPosition::new(origin_x, origin_y));
-    let scale = pin.window().scale_factor().max(0.1);
-    pin.set_shadow_extent(PIN_SHADOW_EXTENT_PHYSICAL as f32 / scale);
-    pin.window().set_size(PhysicalSize::new(
-        window_width.saturating_add(PIN_SHADOW_EXTENT_PHYSICAL),
-        window_height.saturating_add(PIN_SHADOW_EXTENT_PHYSICAL),
-    ));
+    let hwnd = compositor.create_pin(PinFrame {
+        rgba: frame.rgba(),
+        source_width: frame.width(),
+        source_height: frame.height(),
+        display_width: window_width,
+        display_height: window_height,
+        origin_x,
+        origin_y,
+    })?;
 
     let pins_to_restore = {
         let mut collection = pins.borrow_mut();
@@ -880,25 +743,17 @@ fn create_pinned_frame(
             collection
                 .entries
                 .iter()
-                .map(|entry| entry.window.as_weak())
+                .map(|entry| entry.hwnd)
                 .collect::<Vec<_>>()
         })
     };
     if let Some(pins_to_restore) = pins_to_restore {
-        for pin_weak in pins_to_restore {
-            if let Some(existing_pin) = pin_weak.upgrade() {
-                let _ = existing_pin.show();
-            }
+        for pin_hwnd in pins_to_restore {
+            show_pin_window(pin_hwnd);
         }
     }
 
-    pin.show()
-        .map_err(|error| format!("无法显示贴图窗口：{error}"))?;
-    pins.borrow_mut().entries.push(PinEntry {
-        id: pin_id,
-        window: pin,
-        resize_session: None,
-    });
+    pins.borrow_mut().entries.push(PinEntry { hwnd });
 
     Ok((frame.width(), frame.height()))
 }
@@ -1118,6 +973,7 @@ fn resize_rect_from_pointer(
     }
 }
 
+#[cfg(test)]
 fn scale_rect_around_point(
     rect: FloatRect,
     anchor: FloatPoint,
@@ -1197,93 +1053,10 @@ fn clear_frame(frame: &SharedFrame) {
     }
 }
 
-fn pin_window_rect(pin: &PinWindow) -> FloatRect {
-    let position = pin.window().position();
-    let size = pin.window().size();
-    FloatRect {
-        left: position.x as f32,
-        top: position.y as f32,
-        right: position.x as f32 + size.width as f32,
-        bottom: position.y as f32 + size.height as f32,
-    }
-}
-
-fn pin_pointer_screen(pin: &PinWindow, pointer_x: f32, pointer_y: f32) -> FloatPoint {
-    let position = pin.window().position();
-    let scale = pin.window().scale_factor();
-    FloatPoint {
-        x: position.x as f32 + pointer_x * scale,
-        y: position.y as f32 + pointer_y * scale,
-    }
-}
-
-fn cursor_screen_position() -> Option<FloatPoint> {
-    let mut point = POINT::default();
-    // SAFETY: `point` is a valid writable POINT for the duration of the Win32 call.
-    unsafe { GetCursorPos(&mut point) }.ok()?;
-    Some(FloatPoint {
-        x: point.x as f32,
-        y: point.y as f32,
-    })
-}
-
-fn pin_native_hwnd(pin: &PinWindow) -> Option<HWND> {
-    let handle = pin.window().window_handle();
-    let raw = handle.window_handle().ok()?.as_raw();
-    let RawWindowHandle::Win32(handle) = raw else {
-        return None;
-    };
-    Some(HWND(handle.hwnd.get() as *mut c_void))
-}
-
-fn apply_pin_rect(pin: &PinWindow, rect: FloatRect) {
-    let left = rect.left.round() as i32;
-    let top = rect.top.round() as i32;
-    let width = rect.width().round().max(1.0) as i32;
-    let height = rect.height().round().max(1.0) as i32;
-
-    if let Some(hwnd) = pin_native_hwnd(pin) {
-        // SAFETY: the HWND comes from this live Slint PinWindow and all geometry values are finite.
-        if unsafe {
-            SetWindowPos(
-                hwnd,
-                None,
-                left,
-                top,
-                width,
-                height,
-                SWP_NOACTIVATE | SWP_NOZORDER,
-            )
-        }
-        .is_ok()
-        {
-            pin.window().request_redraw();
-            return;
-        }
-    }
-
-    pin.window()
-        .set_size(PhysicalSize::new(width as u32, height as u32));
-    pin.window().set_position(PhysicalPosition::new(left, top));
-}
-
-fn close_pin(pin_weak: &slint::Weak<PinWindow>, pins: &WeakPins, pin_id: u64) {
-    if let Some(pin) = pin_weak.upgrade() {
-        let _ = pin.hide();
-        pin.set_pinned_frame(Image::default());
-    }
-    if let Some(pins) = pins.upgrade() {
-        let mut collection = pins.borrow_mut();
-        collection.entries.retain(|entry| entry.id != pin_id);
-        if collection.entries.is_empty() {
-            collection.hidden_by_shortcut = false;
-        }
-    }
-}
-
 fn toggle_pin_visibility(app_weak: &slint::Weak<AppWindow>, pins: &SharedPins) {
     let (should_hide, pin_windows) = {
-        let collection = pins.borrow();
+        let mut collection = pins.borrow_mut();
+        collection.prune_closed();
         if collection.entries.is_empty() {
             set_status(app_weak, "当前没有可隐藏的贴图。");
             return;
@@ -1293,44 +1066,20 @@ fn toggle_pin_visibility(app_weak: &slint::Weak<AppWindow>, pins: &SharedPins) {
             collection
                 .entries
                 .iter()
-                .map(|entry| entry.window.as_weak())
+                .map(|entry| entry.hwnd)
                 .collect::<Vec<_>>(),
         )
     };
 
-    let mut first_error = None;
-    for pin_weak in &pin_windows {
-        let Some(pin) = pin_weak.upgrade() else {
-            continue;
-        };
-        let result = if should_hide { pin.hide() } else { pin.show() };
-        if let Err(error) = result
-            && first_error.is_none()
-        {
-            first_error = Some(error.to_string());
-        }
-    }
-
-    if let Some(error) = first_error {
-        set_status(
-            app_weak,
-            &format!(
-                "无法{}全部贴图：{error}",
-                if should_hide { "隐藏" } else { "显示" }
-            ),
-        );
-        return;
-    }
-
-    {
-        let mut collection = pins.borrow_mut();
-        collection.hidden_by_shortcut = should_hide;
+    for hwnd in &pin_windows {
         if should_hide {
-            for entry in &mut collection.entries {
-                entry.resize_session = None;
-            }
+            hide_pin_window(*hwnd);
+        } else {
+            show_pin_window(*hwnd);
         }
     }
+
+    pins.borrow_mut().hidden_by_shortcut = should_hide;
 
     let count = pin_windows.len();
     if should_hide {

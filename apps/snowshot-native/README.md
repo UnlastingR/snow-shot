@@ -8,6 +8,7 @@
 - 选区完成后可在框内拖动，或从四角缩放；Shift 保持比例，Ctrl 保持中心，两个修饰键可组合。
 - 贴图支持拖动、四角等比缩放，以及鼠标位于贴图上时使用 Ctrl+滚轮缩放。
 - 每张贴图可独立关闭；右侧和下侧带 2px 模糊阴影。
+- Windows 贴图使用原生 Win32 + DirectComposition：截图纹理只上传一次，缩放期间只提交 GPU 合成变换，不触发 Slint 窗口重绘。
 - `Alt+F11` 全局隐藏或显示当前全部贴图。
 - 托盘菜单保留直接复制鼠标所在显示器的备用入口。
 - 托盘菜单支持截图、打开设置和退出。
@@ -33,6 +34,7 @@ cargo run
 - `ui/app-window.slint`：窗口属性、页面挂载和 Rust callback 边界
 - `assets/tray-icon.svg`：Native App 自有托盘资源，不依赖 Tauri 图标目录
 - `src/windows_runtime.rs`：Windows 快捷键、托盘 callback 和后台任务调度
+- `src/windows_pin.rs`：Windows 原生贴图窗口、DirectComposition 视觉树和输入命中
 - `src/capture_workflow.rs`：截图 Core 到剪贴板、PNG 保存和贴图的应用级 workflow
 - `../../design/snow-ui.tokens.json`：框架无关的设计 Token
 - `../../docs/native-lite-design-system.md`：设计和交互规范

@@ -6,6 +6,8 @@
 #[cfg(target_os = "windows")]
 mod capture_workflow;
 #[cfg(target_os = "windows")]
+mod windows_pin;
+#[cfg(target_os = "windows")]
 mod windows_runtime;
 
 slint::include_modules!();

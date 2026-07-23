@@ -39,10 +39,11 @@
 
 ## UI 技术路线
 
-首选 `Slint + wgpu`：
+Windows 主平台采用 `Slint + wgpu/DirectComposition`：
 
 - Slint：设置页、托盘窗口、截图工具栏、OCR 结果面板
 - wgpu：截图画布、标注图层和 GPU 合成
+- Win32 + DirectComposition：置顶贴图；截图 Surface 一次上传，拖拽缩放仅更新合成器变换
 - Rust：屏幕捕获、窗口识别、图像编码、剪贴板、配置、OCR 调度
 
 若 Slint 在复杂文本编辑或无障碍方面无法满足要求，备选为 Qt Quick/QML；Rust 核心保持独立，不与 UI 框架耦合。
@@ -121,6 +122,7 @@ apps/
 - 已接入高 DPI 区域选框、截图浮动工具栏、PNG 原生保存和多窗口置顶贴图。
 - 选区支持框内移动与四角缩放，Shift 保持比例，Ctrl 保持中心；贴图支持四角等比缩放和 Ctrl+滚轮缩放。
 - 已接入 `Alt+F11` 全局隐藏/显示贴图；每张贴图可独立关闭，并使用右侧和下侧 2px 模糊阴影。
+- Windows 贴图已从 Slint 独立窗口迁移到 Win32 + DirectComposition；截图 Surface 在创建时上传一次，缩放不再重建 Slint/FemtoVG 绘制表面。
 - 区域截图不会隐藏设置窗口；冻结帧在覆盖层显示前完成选区重置，避免主窗切换和旧帧造成的闪烁。
 - Windows 下一步补齐智能窗口识别，再接现有本地 OCR。
 
