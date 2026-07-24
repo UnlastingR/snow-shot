@@ -4,6 +4,7 @@ members = [
     "../crates/snowshot-clipboard",
     "../crates/snowshot-capture",
     "../crates/snowshot-ocr",
+    "../crates/snowshot-scroll",
     "../crates/snowshot-window",
     "src-crates/app-shared",
     "src-crates/app-utils",

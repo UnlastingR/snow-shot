@@ -6,6 +6,11 @@ publish = false
 workspace = "../../src-tauri"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+atree = "0.5.2"
+rtree_rs = "0.1.4"
+thiserror = "2.0.12"
+uiautomation = { workspace = true }
+
 rayon = { workspace = true }
-windows = { workspace = true, features = ["Win32_Foundation"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 xcap = { workspace = true }

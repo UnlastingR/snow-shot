@@ -17,7 +17,11 @@ use snow_shot_annotate::{
 };
 use snow_shot_capture::PixelRect;
 use snow_shot_ocr::OcrDetectResult;
-use snow_shot_window::{WindowRect, WindowTarget, list_windows};
+use snow_shot_window::{
+    WindowRect, WindowTarget,
+    element::{ElementRect, UIElements},
+    list_windows,
+};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LEFT, VK_RIGHT, VK_SHIFT,
@@ -65,6 +69,9 @@ struct CaptureSession {
     finishing: AtomicBool,
     frame: Mutex<Option<FrozenMonitorFrame>>,
     window_targets: Mutex<Vec<WindowTarget>>,
+    child_element_mode: AtomicBool,
+    element_level: AtomicU8,
+    ui_elements: Mutex<Option<UIElements>>,
     annotation: Mutex<Option<AnnotationState>>,
     settings: Mutex<NativeSettings>,
     sampled_color: Mutex<Option<SampledColor>>,
@@ -1467,14 +1474,15 @@ fn bind_capture_callbacks(
 
     let capture_weak = capture.as_weak();
     let preview_session = Arc::clone(&session);
-    let last_window_target = Cell::new(None::<u32>);
+    let last_window_target = Rc::new(Cell::new(None::<u32>));
+    let preview_last_window_target = Rc::clone(&last_window_target);
     capture.on_window_target_requested(move |x, y, canvas_width, canvas_height| {
         let preview =
             window_preview_for_pointer(&preview_session, x, y, canvas_width, canvas_height);
         if let Some(capture) = capture_weak.upgrade() {
             match preview {
-                Some(preview) if last_window_target.get() != Some(preview.id) => {
-                    last_window_target.set(Some(preview.id));
+                Some(preview) if preview_last_window_target.get() != Some(preview.id) => {
+                    preview_last_window_target.set(Some(preview.id));
                     capture.invoke_apply_window_preview(
                         preview.rect.left,
                         preview.rect.top,
@@ -1483,7 +1491,7 @@ fn bind_capture_callbacks(
                     );
                 }
                 Some(_) => {}
-                None if last_window_target.take().is_some() => {
+                None if preview_last_window_target.take().is_some() => {
                     capture.invoke_clear_window_preview();
                 }
                 None => {}
@@ -1491,6 +1499,76 @@ fn bind_capture_callbacks(
         }
     });
 
+    let element_mode_session = Arc::clone(&session);
+    let element_mode_capture = capture.as_weak();
+    let element_mode_app = app.as_weak();
+    let element_mode_last_target = Rc::clone(&last_window_target);
+    capture.on_element_mode_toggle_requested(move || {
+        let was_enabled = element_mode_session
+            .child_element_mode
+            .load(Ordering::Acquire);
+        let cache_available = element_mode_session
+            .ui_elements
+            .lock()
+            .map(|cache| cache.is_some())
+            .unwrap_or(false);
+        let enabled = !was_enabled && cache_available;
+        element_mode_session
+            .child_element_mode
+            .store(enabled, Ordering::Release);
+        element_mode_session
+            .element_level
+            .store(0, Ordering::Release);
+        element_mode_last_target.take();
+        if let Some(capture) = element_mode_capture.upgrade() {
+            capture.invoke_clear_window_preview();
+        }
+        set_status(
+            &element_mode_app,
+            if enabled {
+                "已切换到子元素模式；Tab 返回窗口模式。"
+            } else if was_enabled {
+                "已切换到窗口模式；Tab 进入子元素模式。"
+            } else {
+                "当前桌面无法初始化子元素识别，继续使用窗口模式。"
+            },
+        );
+        enabled
+    });
+
+    let element_level_session = Arc::clone(&session);
+    let element_level_capture = capture.as_weak();
+    let element_level_app = app.as_weak();
+    let element_level_last_target = Rc::clone(&last_window_target);
+    capture.on_element_level_change_requested(move |delta| {
+        if !element_level_session
+            .child_element_mode
+            .load(Ordering::Acquire)
+            || delta == 0
+        {
+            return;
+        }
+        let current = element_level_session.element_level.load(Ordering::Acquire);
+        let next = if delta > 0 {
+            current.saturating_add(1).min(32)
+        } else {
+            current.saturating_sub(1)
+        };
+        element_level_session
+            .element_level
+            .store(next, Ordering::Release);
+        element_level_last_target.take();
+        if let Some(capture) = element_level_capture.upgrade() {
+            capture.invoke_clear_window_preview();
+        }
+        set_status(
+            &element_level_app,
+            &format!(
+                "子元素模式：当前第 {} 层，滚轮切换父级。",
+                usize::from(next) + 1
+            ),
+        );
+    });
     let capture_weak = capture.as_weak();
     let transform_session = Arc::clone(&session);
     let transform_app = app.as_weak();
@@ -1818,6 +1896,13 @@ fn request_region_capture(app_weak: slint::Weak<AppWindow>, session: SharedCaptu
                     if let Ok(mut targets) = worker_session.window_targets.lock() {
                         *targets = window_targets;
                     }
+                    let mut ui_elements = UIElements::new();
+                    if ui_elements.init().is_ok()
+                        && ui_elements.init_cache().is_ok()
+                        && let Ok(mut cached) = worker_session.ui_elements.lock()
+                    {
+                        *cached = Some(ui_elements);
+                    }
                     let frame_stored = worker_session
                         .frame
                         .lock()
@@ -2075,22 +2160,53 @@ fn window_preview_for_pointer(
         return None;
     }
 
-    let targets = session.window_targets.lock().ok()?;
-    let frame = session.frame.lock().ok()?;
-    let frame = frame.as_ref()?;
-    if frame.width() == 0 || frame.height() == 0 {
+    let (frame_x, frame_y, frame_width, frame_height) = {
+        let frame = session.frame.lock().ok()?;
+        let frame = frame.as_ref()?;
+        (
+            frame.origin_x(),
+            frame.origin_y(),
+            frame.width(),
+            frame.height(),
+        )
+    };
+    if frame_width == 0 || frame_height == 0 {
         return None;
     }
 
-    let pixel_x = ((x / canvas_width).clamp(0.0, 1.0) * frame.width() as f32)
+    let pixel_x = ((x / canvas_width).clamp(0.0, 1.0) * frame_width as f32)
         .floor()
-        .min(frame.width().saturating_sub(1) as f32) as i64
-        + frame.origin_x() as i64;
-    let pixel_y = ((y / canvas_height).clamp(0.0, 1.0) * frame.height() as f32)
+        .min(frame_width.saturating_sub(1) as f32) as i64
+        + frame_x as i64;
+    let pixel_y = ((y / canvas_height).clamp(0.0, 1.0) * frame_height as f32)
         .floor()
-        .min(frame.height().saturating_sub(1) as f32) as i64
-        + frame.origin_y() as i64;
+        .min(frame_height.saturating_sub(1) as f32) as i64
+        + frame_y as i64;
 
+    if session.child_element_mode.load(Ordering::Acquire) {
+        let elements = session
+            .ui_elements
+            .lock()
+            .ok()?
+            .as_mut()?
+            .get_element_from_point_walker(pixel_x as i32, pixel_y as i32)
+            .ok()?
+            .into_iter()
+            .filter(|rect| rect.max_x > rect.min_x && rect.max_y > rect.min_y)
+            .collect::<Vec<_>>();
+        let level = usize::from(session.element_level.load(Ordering::Acquire))
+            .min(elements.len().saturating_sub(1));
+        let element = *elements.get(level)?;
+        let window =
+            WindowRect::new(element.min_x, element.min_y, element.max_x, element.max_y).ok()?;
+        let rect = normalized_window_rect(frame_x, frame_y, frame_width, frame_height, window)?;
+        return Some(WindowPreview {
+            id: element_preview_id(element),
+            rect,
+        });
+    }
+
+    let targets = session.window_targets.lock().ok()?;
     let target = targets.iter().find(|target| {
         let rect = target.rect();
         pixel_x >= rect.min_x() as i64
@@ -2098,14 +2214,7 @@ fn window_preview_for_pointer(
             && pixel_y >= rect.min_y() as i64
             && pixel_y < rect.max_y() as i64
     })?;
-
-    let rect = normalized_window_rect(
-        frame.origin_x(),
-        frame.origin_y(),
-        frame.width(),
-        frame.height(),
-        target.rect(),
-    )?;
+    let rect = normalized_window_rect(frame_x, frame_y, frame_width, frame_height, target.rect())?;
 
     Some(WindowPreview {
         id: target.id(),
@@ -2113,6 +2222,17 @@ fn window_preview_for_pointer(
     })
 }
 
+const fn element_preview_id(rect: ElementRect) -> u32 {
+    let mut hash = 2_166_136_261_u32;
+    let values = [rect.min_x, rect.min_y, rect.max_x, rect.max_y];
+    let mut index = 0;
+    while index < values.len() {
+        hash ^= values[index] as u32;
+        hash = hash.wrapping_mul(16_777_619);
+        index += 1;
+    }
+    hash
+}
 fn normalized_window_rect(
     frame_x: i32,
     frame_y: i32,
@@ -3499,6 +3619,11 @@ fn clear_window_targets(session: &CaptureSession) {
     if let Ok(mut targets) = session.window_targets.lock() {
         targets.clear();
     }
+    if let Ok(mut elements) = session.ui_elements.lock() {
+        elements.take();
+    }
+    session.child_element_mode.store(false, Ordering::Release);
+    session.element_level.store(0, Ordering::Release);
 }
 
 fn clear_capture_data(session: &CaptureSession) {

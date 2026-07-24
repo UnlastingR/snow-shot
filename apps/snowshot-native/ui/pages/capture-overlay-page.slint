@@ -55,6 +55,7 @@ export component CaptureOverlayPage inherits Rectangle {
     in-out property <float> property-position-x: -1;
     in-out property <float> property-position-y: -1;
     in-out property <bool> text-input-active: false;
+    in-out property <bool> child-element-mode: false;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
@@ -83,6 +84,8 @@ export component CaptureOverlayPage inherits Rectangle {
     callback floating-position-changed(int, float, float);
     callback toolbar-drag-event(int, float, float);
     callback window-target-requested(float, float, float, float);
+    callback element-mode-toggle-requested() -> bool;
+    callback element-level-change-requested(int);
     callback selection-transform-requested(
         int,
         float, float, float, float,
@@ -501,6 +504,22 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.hover-update-pending = true;
             }
         }
+        scroll-event(event) => {
+            if root.child-element-mode && !root.has-selection
+                    && !root.selecting && !root.window-click-pending {
+                if event.delta-y > 0 {
+                    root.element-level-change-requested(1);
+                    root.hover-update-pending = true;
+                    return accept;
+                }
+                if event.delta-y < 0 {
+                    root.element-level-change-requested(-1);
+                    root.hover-update-pending = true;
+                    return accept;
+                }
+            }
+            reject
+        }
     }
 
     Timer {
@@ -825,7 +844,9 @@ export component CaptureOverlayPage inherits Rectangle {
                     : "框内拖动移动 · 四边/四角缩放 · Shift 等比 · Ctrl 中心缩放"
                 : root.window-preview-visible
                     ? "单击选择窗口 · 拖动切换为自由框选 · Esc 取消"
-                    : "移动鼠标智能选窗 · 拖动自由框选 · Esc 取消";
+                    : root.child-element-mode
+                        ? "子元素模式 · Tab 切换窗口模式 · 滚轮切换父级"
+                        : "窗口模式 · Tab 切换子元素 · 拖动自由框选";
             color: white;
             font-size: SnowTheme.body-size;
             horizontal-alignment: center;
@@ -1159,6 +1180,15 @@ export component CaptureOverlayPage inherits Rectangle {
         KeyBinding {
             keys: @keys(Escape);
             activated => { root.handle-native-escape(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Tab);
+            enabled: !root.text-input-active && !root.has-selection;
+            activated => {
+                root.child-element-mode = root.element-mode-toggle-requested();
+                root.hover-update-pending = true;
+            }
         }
 
         KeyBinding {

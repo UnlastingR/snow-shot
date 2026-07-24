@@ -1,0 +1,14 @@
+[package]
+name = "snow-shot-scroll"
+version = "0.1.0"
+edition = "2024"
+publish = false
+workspace = "../../src-tauri"
+
+[dependencies]
+serde = { workspace = true }
+image = { workspace = true }
+imageproc = { workspace = true }
+rayon = { workspace = true }
+fast_image_resize = { version = "^5.2", features = ["rayon"] }
+hora = { version = "^0.1.1" }

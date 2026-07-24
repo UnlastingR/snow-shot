@@ -50,6 +50,7 @@ export component CaptureWindow inherits Window {
     in-out property <float> property-position-x: -1;
     in-out property <float> property-position-y: -1;
     in-out property <bool> text-input-active: false;
+    in-out property <bool> child-element-mode: false;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
@@ -78,6 +79,8 @@ export component CaptureWindow inherits Window {
     callback floating-position-changed(int, float, float);
     callback toolbar-drag-event(int, float, float);
     callback window-target-requested(float, float, float, float);
+    callback element-mode-toggle-requested() -> bool;
+    callback element-level-change-requested(int);
     callback selection-transform-requested(
         int,
         float, float, float, float,
@@ -169,6 +172,7 @@ export component CaptureWindow inherits Window {
         property-position-x <=> root.property-position-x;
         property-position-y <=> root.property-position-y;
         text-input-active <=> root.text-input-active;
+        child-element-mode <=> root.child-element-mode;
         selection-confirmed(left, top, right, bottom) => {
             root.selection-confirmed(left, top, right, bottom);
         }
@@ -225,6 +229,8 @@ export component CaptureWindow inherits Window {
         window-target-requested(x, y, width, height) => {
             root.window-target-requested(x, y, width, height);
         }
+        element-mode-toggle-requested => { return root.element-mode-toggle-requested(); }
+        element-level-change-requested(delta) => { root.element-level-change-requested(delta); }
         selection-transform-requested(
             mode,
             start-left, start-top, start-right, start-bottom,

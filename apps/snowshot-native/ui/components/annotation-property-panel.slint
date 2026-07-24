@@ -226,6 +226,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
 
 
     VerticalLayout {
+        visible: !root.ocr-selected;
         x: 12px;
         y: 6px;
         width: parent.width - 24px;
@@ -476,4 +477,89 @@ export component AnnotationPropertyPanel inherits Rectangle {
 
 
     }
-}
+
+    if root.ocr-selected : VerticalLayout {
+        x: 12px;
+        y: 6px;
+        width: parent.width - 24px;
+        height: parent.height - 12px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            ColorField {
+                label: "字";
+                swatch: root.text-color;
+                value <=> root.text-hex;
+                submitted(value) => { root.color-submitted(2, value); }
+                selected => { root.active-color-slot = 2; }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            }
+            SmallButton {
+                width: 54px;
+                label: root.ocr-visible ? "隐藏OCR" : "显示OCR";
+                clicked => { root.ocr-visibility-requested(!root.ocr-visible); }
+            }
+            SmallButton {
+                width: 62px;
+                label: "复制文字";
+                clicked => { root.ocr-copy-requested(); }
+            }
+            SmallButton {
+                width: 54px;
+                label: "自动色";
+                selected: !root.ocr-manual-color;
+                clicked => { root.ocr-auto-color-requested(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            NumericControl {
+                label: "透明";
+                value: root.opacity-percent;
+                minimum: 0;
+                maximum: 100;
+                changed(value) => { root.style-value-changed(1, value); }
+            }
+            NumericControl {
+                label: "色透";
+                value: root.active-color-alpha;
+                minimum: 0;
+                maximum: 100;
+                changed(value) => { root.color-alpha-changed(2, value); }
+            }
+            NumericControl {
+                label: "模糊";
+                value: root.effect-strength;
+                minimum: 5;
+                maximum: 100;
+                changed(value) => { root.style-value-changed(3, value); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        HorizontalLayout {
+            spacing: 4px;
+            ColorPreset { swatch: #e84444; clicked => { root.color-submitted(2, "#E84444"); } }
+            ColorPreset { swatch: #ff8a00; clicked => { root.color-submitted(2, "#FF8A00"); } }
+            ColorPreset { swatch: #ffd60a; clicked => { root.color-submitted(2, "#FFD60A"); } }
+            ColorPreset { swatch: #1eb980; clicked => { root.color-submitted(2, "#1EB980"); } }
+            ColorPreset { swatch: #168cde; clicked => { root.color-submitted(2, "#168CDE"); } }
+            ColorPreset { swatch: #7b61ff; clicked => { root.color-submitted(2, "#7B61FF"); } }
+            ColorPreset { swatch: #ffffff; clicked => { root.color-submitted(2, "#FFFFFF"); } }
+            ColorPreset { swatch: #111111; clicked => { root.color-submitted(2, "#111111"); } }
+            Text {
+                horizontal-stretch: 1;
+                text: "OCR 文字层";
+                color: #8c8c8c;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+            SmallButton { label: "置底"; clicked => { root.layer-requested(0); } }
+            SmallButton { label: "下移"; clicked => { root.layer-requested(1); } }
+            SmallButton { label: "上移"; clicked => { root.layer-requested(2); } }
+            SmallButton { label: "置顶"; clicked => { root.layer-requested(3); } }
+        }
+    }}

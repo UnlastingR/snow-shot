@@ -6994,6 +6994,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-shot-scroll"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
+ "hora",
+ "image",
+ "imageproc",
+ "rayon",
+ "serde",
+]
+
+[[package]]
 name = "snow-shot-tauri-commands-core"
 version = "0.1.0"
 dependencies = [
@@ -7112,7 +7124,11 @@ dependencies = [
 name = "snow-shot-window"
 version = "0.1.0"
 dependencies = [
+ "atree",
  "rayon",
+ "rtree_rs",
+ "thiserror 2.0.17",
+ "uiautomation",
  "windows 0.61.3",
  "xcap",
 ]

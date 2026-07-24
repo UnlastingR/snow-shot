@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+pub mod element;
+
 use std::fmt;
 
 #[derive(Debug)]
