@@ -272,6 +272,7 @@ export component CaptureToolbar inherits Rectangle {
     in property <int> active-tool: 0;
     in property <bool> can-undo: false;
     in property <bool> can-redo: false;
+    in property <bool> has-annotations: false;
     in property <color> active-color: #e84444;
     in property <string> color-label: "#E84444";
     in property <bool> ocr-busy: false;
@@ -288,6 +289,7 @@ export component CaptureToolbar inherits Rectangle {
     callback tool-selected(int);
     callback undo-clicked();
     callback redo-clicked();
+    callback clear-clicked();
     callback drag-began();
     callback drag-moved();
     callback drag-ended();
@@ -375,13 +377,10 @@ export component CaptureToolbar inherits Rectangle {
         ToolButton { width: 42px; label: root.ocr-busy ? "OCR…" : "OCR"; enabled: !root.ocr-busy; clicked => { root.open-group = 0; root.ocr-clicked(); } }
         HistoryButton { label: "撤销"; enabled: root.can-undo; clicked => { root.undo-clicked(); } }
         HistoryButton { label: "重做"; enabled: root.can-redo; reverse: true; clicked => { root.redo-clicked(); } }
-        Rectangle {
-            width: 26px;
-            height: 26px;
-            border-radius: 5px;
-            border-width: 1px;
-            border-color: #d9d9d9;
-            background: root.active-color;
+        ToolButton {
+            label: "清空";
+            enabled: root.has-annotations;
+            clicked => { root.clear-clicked(); }
         }
         Divider {}
         ActionButton { label: "关闭"; danger: true; clicked => { root.cancel-clicked(); } }

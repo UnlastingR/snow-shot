@@ -13,7 +13,7 @@ use slint::{
 };
 use snow_shot_annotate::{
     AnnotationDocument, AnnotationTool, ElementStyle, LayerCommand, OcrBlock, OcrLayerStyle, Point,
-    RgbaColor, StylePatch, TextAlignment,
+    RgbaColor, SelectionHandle, StylePatch, TextAlignment,
 };
 use snow_shot_capture::PixelRect;
 use snow_shot_ocr::OcrDetectResult;
@@ -104,6 +104,7 @@ struct AnnotationUiSnapshot {
     tool: i32,
     can_undo: bool,
     can_redo: bool,
+    has_annotations: bool,
     color: RgbaColor,
     color_label: String,
     selected_ocr_text: String,
@@ -920,6 +921,23 @@ fn bind_capture_callbacks(
             .unwrap_or(false)
     });
 
+    let annotation_handle_session = Arc::clone(&session);
+    capture.on_annotation_handle_at(move |normalized_x, normalized_y| {
+        annotation_handle_session
+            .annotation
+            .lock()
+            .ok()
+            .and_then(|annotation| {
+                annotation.as_ref().map(|annotation| {
+                    let point = Point::new(
+                        normalized_x.clamp(0.0, 1.0) * annotation.document.width() as f32,
+                        normalized_y.clamp(0.0, 1.0) * annotation.document.height() as f32,
+                    );
+                    selection_handle_cursor_id(annotation.document.selection_handle_at(point))
+                })
+            })
+            .unwrap_or(0)
+    });
     let app_weak = app.as_weak();
     let annotation_capture = capture.as_weak();
     let annotation_session = Arc::clone(&session);
@@ -1090,21 +1108,29 @@ fn bind_capture_callbacks(
                 let annotation = guard
                     .as_mut()
                     .ok_or_else(|| "当前没有可撤销的标注。".to_string())?;
+                let was_locked = annotation.document.has_annotations();
                 annotation.document.undo();
-                Ok(annotation_snapshot(annotation))
+                let restore_region = (!was_locked && annotation.document.has_annotations())
+                    .then_some(annotation.region);
+                Ok((annotation_snapshot(annotation), restore_region))
             });
         match result {
-            Ok(snapshot) => {
-                if let Some(capture) = annotation_capture.upgrade()
-                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
-                {
-                    set_status(&app_weak, &error);
+            Ok((snapshot, restore_region)) => {
+                if let Some(capture) = annotation_capture.upgrade() {
+                    if let Some(region) = restore_region
+                        && let Err(error) =
+                            apply_region_selection(&capture, &annotation_session, region)
+                    {
+                        set_status(&app_weak, &error);
+                    }
+                    if let Err(error) = apply_annotation_snapshot(&capture, snapshot) {
+                        set_status(&app_weak, &error);
+                    }
                 }
             }
             Err(error) => set_status(&app_weak, &error),
         }
     });
-
     let app_weak = app.as_weak();
     let annotation_capture = capture.as_weak();
     let annotation_session = Arc::clone(&session);
@@ -1135,11 +1161,19 @@ fn bind_capture_callbacks(
     let annotation_capture = capture.as_weak();
     let annotation_session = Arc::clone(&session);
     capture.on_annotation_reset_requested(move || {
-        if let Ok(mut annotation) = annotation_session.annotation.lock() {
-            annotation.take();
-        }
-        if let Some(capture) = annotation_capture.upgrade() {
-            clear_annotation_ui(&capture);
+        let snapshot = annotation_session
+            .annotation
+            .lock()
+            .ok()
+            .and_then(|mut guard| {
+                let annotation = guard.as_mut()?;
+                annotation.document.clear_annotations();
+                annotation.tool = 0;
+                annotation.previous_tool = 0;
+                Some(annotation_snapshot(annotation))
+            });
+        if let (Some(capture), Some(snapshot)) = (annotation_capture.upgrade(), snapshot) {
+            let _ = apply_annotation_snapshot(&capture, snapshot);
         }
     });
 
@@ -1458,6 +1492,8 @@ fn bind_capture_callbacks(
     });
 
     let capture_weak = capture.as_weak();
+    let transform_session = Arc::clone(&session);
+    let transform_app = app.as_weak();
     capture.on_selection_transform_requested(
         move |mode,
               start_left,
@@ -1478,7 +1514,7 @@ fn bind_capture_callbacks(
                 right: start_right,
                 bottom: start_bottom,
             };
-            let transformed = transform_selection(
+            let Some(mut transformed) = transform_selection(
                 mode,
                 start,
                 FloatPoint {
@@ -1497,15 +1533,85 @@ fn bind_capture_callbacks(
                 },
                 preserve_aspect,
                 centered,
-            );
+            ) else {
+                return;
+            };
 
-            if let (Some(capture), Some(transformed)) = (capture_weak.upgrade(), transformed) {
+            let locked_region = transform_session.annotation.lock().ok().and_then(|guard| {
+                guard.as_ref().and_then(|annotation| {
+                    annotation
+                        .document
+                        .has_annotations()
+                        .then_some(annotation.region)
+                })
+            });
+            let snapshot = if let Some(current) = locked_region {
+                if mode != 0 || canvas_width <= 0.0 || canvas_height <= 0.0 {
+                    return;
+                }
+                let requested = match selection_region(
+                    &transform_session,
+                    transformed.left / canvas_width,
+                    transformed.top / canvas_height,
+                    transformed.right / canvas_width,
+                    transformed.bottom / canvas_height,
+                ) {
+                    Ok(region) => region,
+                    Err(error) => {
+                        set_status(&transform_app, &error);
+                        return;
+                    }
+                };
+                let (frame_width, frame_height) = match transform_session.frame.lock() {
+                    Ok(frame) => match frame.as_ref() {
+                        Some(frame) => (frame.width(), frame.height()),
+                        None => return,
+                    },
+                    Err(_) => return,
+                };
+                let x = requested
+                    .x()
+                    .min(frame_width.saturating_sub(current.width()));
+                let y = requested
+                    .y()
+                    .min(frame_height.saturating_sub(current.height()));
+                let region = match PixelRect::new(x, y, current.width(), current.height()) {
+                    Ok(region) => region,
+                    Err(error) => {
+                        set_status(&transform_app, &error.to_string());
+                        return;
+                    }
+                };
+                transformed = FloatRect {
+                    left: region.x() as f32 / frame_width as f32 * canvas_width,
+                    top: region.y() as f32 / frame_height as f32 * canvas_height,
+                    right: (region.x() + region.width()) as f32 / frame_width as f32 * canvas_width,
+                    bottom: (region.y() + region.height()) as f32 / frame_height as f32
+                        * canvas_height,
+                };
+                match rebase_annotation_region(&transform_session, region) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        set_status(&transform_app, &error);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(capture) = capture_weak.upgrade() {
                 capture.invoke_apply_selection(
                     transformed.left,
                     transformed.top,
                     transformed.right,
                     transformed.bottom,
                 );
+                if let Some(snapshot) = snapshot
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&transform_app, &error);
+                }
             }
         },
     );
@@ -2075,20 +2181,65 @@ fn selection_region(
     normalized_region(frame, left, top, right, bottom).map_err(|error| error.to_string())
 }
 
+fn apply_region_selection(
+    capture: &CaptureWindow,
+    session: &CaptureSession,
+    region: PixelRect,
+) -> Result<(), String> {
+    let (frame_width, frame_height) = {
+        let frame = session
+            .frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())?;
+        let frame = frame
+            .as_ref()
+            .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+        (frame.width(), frame.height())
+    };
+    let size = capture.window().size();
+    let scale = capture.window().scale_factor().max(0.1);
+    let canvas_width = size.width as f32 / scale;
+    let canvas_height = size.height as f32 / scale;
+    capture.invoke_apply_selection(
+        region.x() as f32 / frame_width as f32 * canvas_width,
+        region.y() as f32 / frame_height as f32 * canvas_height,
+        (region.x() + region.width()) as f32 / frame_width as f32 * canvas_width,
+        (region.y() + region.height()) as f32 / frame_height as f32 * canvas_height,
+    );
+    Ok(())
+}
+
 fn selected_region_frame(
     session: &CaptureSession,
     region: PixelRect,
 ) -> Result<FrozenRegionFrame, String> {
-    if let Ok(annotation) = session.annotation.lock()
-        && let Some(annotation) = annotation.as_ref()
-        && annotation.region == region
-    {
-        return FrozenRegionFrame::from_rgba(
-            annotation.document.width(),
-            annotation.document.height(),
-            annotation.document.pixels().to_vec(),
-        )
-        .map_err(|error| error.to_string());
+    let annotated_region = session.annotation.lock().ok().and_then(|guard| {
+        guard.as_ref().and_then(|annotation| {
+            annotation
+                .document
+                .has_annotations()
+                .then_some(annotation.region)
+        })
+    });
+    if let Some(current) = annotated_region {
+        let region = if region.width() == current.width() && region.height() == current.height() {
+            region
+        } else {
+            current
+        };
+        rebase_annotation_region(session, region)?;
+        if let Ok(annotation) = session.annotation.lock()
+            && let Some(annotation) = annotation.as_ref()
+            && annotation.document.has_annotations()
+            && annotation.region == region
+        {
+            return FrozenRegionFrame::from_rgba(
+                annotation.document.width(),
+                annotation.document.height(),
+                annotation.document.pixels().to_vec(),
+            )
+            .map_err(|error| error.to_string());
+        }
     }
 
     let frame = session
@@ -2099,6 +2250,57 @@ fn selected_region_frame(
         .as_ref()
         .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
     extract_frozen_region(frame, region).map_err(|error| error.to_string())
+}
+
+fn rebase_annotation_region(
+    session: &CaptureSession,
+    region: PixelRect,
+) -> Result<Option<AnnotationUiSnapshot>, String> {
+    let should_rebase = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?
+        .as_ref()
+        .is_some_and(|annotation| {
+            annotation.document.has_annotations()
+                && annotation.region != region
+                && annotation.document.width() == region.width()
+                && annotation.document.height() == region.height()
+        });
+    if !should_rebase {
+        return Ok(None);
+    }
+
+    let selected = {
+        let frame = session
+            .frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())?;
+        let frame = frame
+            .as_ref()
+            .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+        extract_frozen_region(frame, region).map_err(|error| error.to_string())?
+    };
+
+    let mut guard = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?;
+    let Some(annotation) = guard.as_mut() else {
+        return Ok(None);
+    };
+    if !annotation.document.has_annotations()
+        || annotation.document.width() != region.width()
+        || annotation.document.height() != region.height()
+    {
+        return Ok(None);
+    }
+    annotation
+        .document
+        .replace_original(selected.rgba().to_vec())
+        .map_err(|error| error.to_string())?;
+    annotation.region = region;
+    Ok(Some(annotation_snapshot(annotation)))
 }
 
 fn ocr_blocks_from_result(result: OcrDetectResult) -> Vec<OcrBlock> {
@@ -2307,6 +2509,22 @@ fn ensure_annotation_state(
         .map_err(|_| "标注会话状态不可用。".to_string())?;
     *current = Some(annotation);
     Ok(snapshot)
+}
+
+const fn selection_handle_cursor_id(handle: SelectionHandle) -> i32 {
+    match handle {
+        SelectionHandle::None => 0,
+        SelectionHandle::Move => 1,
+        SelectionHandle::TopLeft => 2,
+        SelectionHandle::Top => 3,
+        SelectionHandle::TopRight => 4,
+        SelectionHandle::Right => 5,
+        SelectionHandle::BottomRight => 6,
+        SelectionHandle::Bottom => 7,
+        SelectionHandle::BottomLeft => 8,
+        SelectionHandle::Left => 9,
+        SelectionHandle::Rotate => 10,
+    }
 }
 
 fn annotation_tool(tool: i32) -> Option<AnnotationTool> {
@@ -2643,6 +2861,7 @@ fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
         tool: annotation.tool,
         can_undo: annotation.document.can_undo(),
         can_redo: annotation.document.can_redo(),
+        has_annotations: annotation.document.has_annotations(),
         color: annotation.color,
         color_label: annotation.color.display_hex(),
         selected_ocr_text: annotation
@@ -2707,10 +2926,11 @@ fn apply_annotation_snapshot(
     }
     pixels.make_mut_bytes().copy_from_slice(&snapshot.pixels);
     capture.set_annotation_frame(Image::from_rgba8(pixels));
-    capture.set_annotation_visible(true);
+    capture.set_annotation_visible(snapshot.has_annotations || snapshot.tool != 0);
     capture.set_annotation_tool(snapshot.tool);
     capture.set_annotation_can_undo(snapshot.can_undo);
     capture.set_annotation_can_redo(snapshot.can_redo);
+    capture.set_annotation_locked(snapshot.has_annotations);
     capture.set_annotation_color(Color::from_rgb_u8(
         snapshot.color.red,
         snapshot.color.green,
@@ -2749,6 +2969,7 @@ fn clear_annotation_ui(capture: &CaptureWindow) {
     capture.set_annotation_tool(0);
     capture.set_annotation_can_undo(false);
     capture.set_annotation_can_redo(false);
+    capture.set_annotation_locked(false);
     capture.set_annotation_color(Color::from_rgb_u8(232, 68, 68));
     capture.set_annotation_color_label("#E84444".into());
     capture.set_ocr_selected_text(String::new().into());

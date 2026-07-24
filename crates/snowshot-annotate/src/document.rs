@@ -211,6 +211,8 @@ pub enum ElementKind {
         start: Point,
         end: Point,
         shape: AnnotationTool,
+        #[serde(default)]
+        rotation_radians: f32,
     },
     SerialNumber {
         center: Point,
@@ -244,9 +246,16 @@ impl AnnotationElement {
                     ))
                     .expanded(self.style.stroke_width.max(self.style.brush_size) / 2.0)
             }
-            ElementKind::Line { start, end, .. } | ElementKind::Shape { start, end, .. } => {
+            ElementKind::Line { start, end, .. } => {
                 Rect::from_points(*start, *end).expanded(self.style.stroke_width / 2.0)
             }
+            ElementKind::Shape {
+                start,
+                end,
+                shape,
+                rotation_radians,
+            } => shape_bounds(*start, *end, *shape, *rotation_radians)
+                .expanded(self.style.stroke_width / 2.0),
             ElementKind::SerialNumber { center, .. } => {
                 let radius = (self.style.font_size * 0.9).clamp(13.0, 36.0);
                 Rect::from_points(
@@ -263,6 +272,10 @@ impl AnnotationElement {
             self.kind,
             ElementKind::Shape { .. } | ElementKind::Text { .. }
         )
+    }
+
+    pub fn supports_rotation(&self) -> bool {
+        matches!(self.kind, ElementKind::Shape { .. })
     }
 }
 
@@ -333,6 +346,7 @@ pub enum SelectionHandle {
     Bottom,
     BottomLeft,
     Left,
+    Rotate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,8 +475,42 @@ impl AnnotationDocument {
         &self.state.elements
     }
 
+    pub fn has_annotations(&self) -> bool {
+        !self.state.elements.is_empty() || !self.state.ocr_blocks.is_empty()
+    }
+
     pub fn ocr_blocks(&self) -> &[OcrBlock] {
         &self.state.ocr_blocks
+    }
+
+    pub fn replace_original(&mut self, pixels: Vec<u8>) -> Result<(), AnnotationError> {
+        let expected = expected_pixel_len(self.width, self.height)
+            .ok_or(AnnotationError::InvalidDimensions)?;
+        if pixels.len() != expected {
+            return Err(AnnotationError::InvalidPixelLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        self.cancel_active();
+        self.original = pixels;
+        self.refresh();
+        Ok(())
+    }
+
+    pub fn clear_annotations(&mut self) -> bool {
+        self.cancel_active();
+        if !self.has_annotations() {
+            return false;
+        }
+        let baseline = self.state.clone();
+        self.state.elements.clear();
+        self.state.ocr_blocks.clear();
+        self.state.next_serial_number = 1;
+        self.selected = None;
+        self.selected_ocr = None;
+        self.record_state_change(baseline);
+        true
     }
 
     pub fn ocr_style(&self) -> &OcrLayerStyle {
@@ -657,6 +705,7 @@ impl AnnotationDocument {
                         start: point,
                         end: point,
                         shape: tool,
+                        rotation_radians: 0.0,
                     },
                     AnnotationTool::SerialNumber => ElementKind::SerialNumber {
                         center: point,
@@ -703,7 +752,16 @@ impl AnnotationDocument {
                         points.push(point);
                     }
                 }
-                ElementKind::Line { end, .. } | ElementKind::Shape { end, .. } => *end = point,
+                ElementKind::Line { end, .. } => *end = point,
+                ElementKind::Shape {
+                    start, end, shape, ..
+                } => {
+                    *end = if *shape == AnnotationTool::Ellipse && preserve_aspect {
+                        square_endpoint(*start, point, self.width, self.height)
+                    } else {
+                        point
+                    };
+                }
                 ElementKind::SerialNumber { center, .. } => *center = point,
                 ElementKind::Text { bounds, .. } => {
                     bounds.right = point.x.max(bounds.left + MIN_ELEMENT_SIZE);
@@ -717,24 +775,54 @@ impl AnnotationDocument {
                 start_bounds,
                 ..
             }) => {
-                let transformed = transform_rect(
-                    *start_bounds,
-                    *handle,
-                    *start_pointer,
-                    point,
-                    preserve_aspect,
-                    centered,
-                    self.width,
-                    self.height,
-                );
                 let id = original.id;
-                if let Some(element) = self
-                    .state
-                    .elements
-                    .iter_mut()
-                    .find(|element| element.id == id)
-                {
-                    *element = transform_element(original, *start_bounds, transformed);
+                if *handle == SelectionHandle::Rotate {
+                    let center = start_bounds.center();
+                    let start_angle =
+                        (start_pointer.y - center.y).atan2(start_pointer.x - center.x);
+                    let pointer_angle = (point.y - center.y).atan2(point.x - center.x);
+                    if let Some(element) = self
+                        .state
+                        .elements
+                        .iter_mut()
+                        .find(|element| element.id == id)
+                        && let (
+                            ElementKind::Shape {
+                                rotation_radians: original_rotation,
+                                ..
+                            },
+                            ElementKind::Shape {
+                                rotation_radians, ..
+                            },
+                        ) = (&original.kind, &mut element.kind)
+                    {
+                        let value = *original_rotation + pointer_angle - start_angle;
+                        *rotation_radians = if preserve_aspect {
+                            let step = std::f32::consts::PI / 12.0;
+                            (value / step).round() * step
+                        } else {
+                            value
+                        };
+                    }
+                } else {
+                    let transformed = transform_rect(
+                        *start_bounds,
+                        *handle,
+                        *start_pointer,
+                        point,
+                        preserve_aspect,
+                        centered,
+                        self.width,
+                        self.height,
+                    );
+                    if let Some(element) = self
+                        .state
+                        .elements
+                        .iter_mut()
+                        .find(|element| element.id == id)
+                    {
+                        *element = transform_element(original, *start_bounds, transformed);
+                    }
                 }
             }
             None => {}
@@ -1155,14 +1243,21 @@ impl AnnotationDocument {
         let selected = self
             .selected
             .and_then(|id| self.element(id))
-            .map(|element| (element.bounds(), element.supports_resize()));
-        if let Some((bounds, true)) = selected {
+            .map(|element| {
+                (
+                    element.bounds(),
+                    element.supports_resize(),
+                    element.supports_rotation(),
+                )
+            });
+        if let Some((bounds, true, show_rotation)) = selected {
             draw_selection(
                 &mut self.preview_pixels,
                 self.width,
                 self.height,
                 bounds,
                 true,
+                show_rotation,
             );
         }
         let selected_ocr_points = self
@@ -1285,7 +1380,29 @@ fn hit_element(element: &AnnotationElement, point: Point) -> bool {
         ElementKind::Line { start, end, .. } => {
             distance_to_segment(point, *start, *end) <= tolerance
         }
-        ElementKind::Shape { .. } | ElementKind::SerialNumber { .. } | ElementKind::Text { .. } => {
+        ElementKind::Shape {
+            start,
+            end,
+            shape,
+            rotation_radians,
+        } => {
+            let bounds = Rect::from_points(*start, *end);
+            let center = bounds.center();
+            let local = rotate_point(point, center, -*rotation_radians);
+            let radius_x = (bounds.width() / 2.0).max(1.0);
+            let radius_y = (bounds.height() / 2.0).max(1.0);
+            let normalized_x = (local.x - center.x).abs() / (radius_x + tolerance);
+            let normalized_y = (local.y - center.y).abs() / (radius_y + tolerance);
+            match shape {
+                AnnotationTool::Rectangle => bounds.expanded(tolerance).contains(local),
+                AnnotationTool::Ellipse => {
+                    normalized_x * normalized_x + normalized_y * normalized_y <= 1.0
+                }
+                AnnotationTool::Diamond => normalized_x + normalized_y <= 1.0,
+                _ => false,
+            }
+        }
+        ElementKind::SerialNumber { .. } | ElementKind::Text { .. } => {
             element.bounds().expanded(4.0).contains(point)
         }
     }
@@ -1304,6 +1421,13 @@ fn distance_to_segment(point: Point, start: Point, end: Point) -> f32 {
 }
 
 fn selection_handle_for_element(element: &AnnotationElement, point: Point) -> SelectionHandle {
+    if element.supports_rotation() {
+        let bounds = element.bounds();
+        let rotation_handle = Point::new((bounds.left + bounds.right) / 2.0, bounds.top - 24.0);
+        if rotation_handle.distance(point) <= HANDLE_RADIUS * 1.8 {
+            return SelectionHandle::Rotate;
+        }
+    }
     if element.supports_resize() {
         hit_selection_handle(element.bounds(), point)
     } else if hit_element(element, point) {
@@ -1359,6 +1483,25 @@ fn hit_selection_handle(bounds: Rect, point: Point) -> SelectionHandle {
                 SelectionHandle::None
             }
         })
+}
+
+fn square_endpoint(start: Point, pointer: Point, canvas_width: u32, canvas_height: u32) -> Point {
+    let dx = pointer.x - start.x;
+    let dy = pointer.y - start.y;
+    let direction_x = if dx < 0.0 { -1.0 } else { 1.0 };
+    let direction_y = if dy < 0.0 { -1.0 } else { 1.0 };
+    let available_x = if direction_x < 0.0 {
+        start.x
+    } else {
+        canvas_width.saturating_sub(1) as f32 - start.x
+    };
+    let available_y = if direction_y < 0.0 {
+        start.y
+    } else {
+        canvas_height.saturating_sub(1) as f32 - start.y
+    };
+    let size = dx.abs().max(dy.abs()).min(available_x).min(available_y);
+    Point::new(start.x + direction_x * size, start.y + direction_y * size)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1594,12 +1737,18 @@ fn render_element(pixels: &mut [u8], width: u32, height: u32, element: &Annotati
                 );
             }
         }
-        ElementKind::Shape { start, end, shape } => {
+        ElementKind::Shape {
+            start,
+            end,
+            shape,
+            rotation_radians,
+        } => {
             draw_shape(
                 pixels,
                 (width, height),
                 (*start, *end),
                 *shape,
+                *rotation_radians,
                 (stroke, fill),
                 element.style.stroke_width,
             );
@@ -1887,42 +2036,104 @@ fn composite_rgba(
     }
 }
 
+fn rotate_point(point: Point, center: Point, angle: f32) -> Point {
+    let cosine = angle.cos();
+    let sine = angle.sin();
+    let dx = point.x - center.x;
+    let dy = point.y - center.y;
+    Point::new(
+        center.x + dx * cosine - dy * sine,
+        center.y + dx * sine + dy * cosine,
+    )
+}
+
+fn shape_outline_points(
+    start: Point,
+    end: Point,
+    shape: AnnotationTool,
+    rotation_radians: f32,
+) -> Vec<Point> {
+    let bounds = Rect::from_points(start, end);
+    let center = bounds.center();
+    let points = match shape {
+        AnnotationTool::Rectangle => vec![
+            Point::new(bounds.left, bounds.top),
+            Point::new(bounds.right, bounds.top),
+            Point::new(bounds.right, bounds.bottom),
+            Point::new(bounds.left, bounds.bottom),
+        ],
+        AnnotationTool::Diamond => vec![
+            Point::new(center.x, bounds.top),
+            Point::new(bounds.right, center.y),
+            Point::new(center.x, bounds.bottom),
+            Point::new(bounds.left, center.y),
+        ],
+        AnnotationTool::Ellipse => {
+            let radius_x = bounds.width() / 2.0;
+            let radius_y = bounds.height() / 2.0;
+            (0..72)
+                .map(|index| {
+                    let angle = index as f32 / 72.0 * std::f32::consts::TAU;
+                    Point::new(
+                        center.x + radius_x * angle.cos(),
+                        center.y + radius_y * angle.sin(),
+                    )
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    points
+        .into_iter()
+        .map(|point| rotate_point(point, center, rotation_radians))
+        .collect()
+}
+
+fn shape_bounds(start: Point, end: Point, shape: AnnotationTool, rotation_radians: f32) -> Rect {
+    bounds_for_points(&shape_outline_points(start, end, shape, rotation_radians))
+        .unwrap_or_else(|| Rect::from_points(start, end))
+}
+
+fn draw_polygon_outline(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    points: &[Point],
+    color: RgbaColor,
+    stroke_width: f32,
+) {
+    for index in 0..points.len() {
+        draw_thick_line(
+            pixels,
+            width,
+            height,
+            points[index],
+            points[(index + 1) % points.len()],
+            color,
+            stroke_width,
+        );
+    }
+}
+
 fn draw_shape(
     pixels: &mut [u8],
     canvas: (u32, u32),
     points: (Point, Point),
     shape: AnnotationTool,
+    rotation_radians: f32,
     colors: (RgbaColor, RgbaColor),
     stroke_width: f32,
 ) {
     let (width, height) = canvas;
     let (start, end) = points;
     let (stroke, fill) = colors;
-    let bounds = Rect::from_points(start, end);
-    match shape {
-        AnnotationTool::Rectangle => {
-            fill_rect(pixels, width, height, bounds, fill);
-            draw_rect_outline(pixels, width, height, bounds, stroke, stroke_width);
-        }
-        AnnotationTool::Ellipse => {
-            fill_ellipse(pixels, width, height, bounds, fill);
-            draw_ellipse_outline(pixels, width, height, bounds, stroke, stroke_width);
-        }
-        AnnotationTool::Diamond => {
-            let center = bounds.center();
-            let points = [
-                Point::new(center.x, bounds.top),
-                Point::new(bounds.right, center.y),
-                Point::new(center.x, bounds.bottom),
-                Point::new(bounds.left, center.y),
-            ];
-            fill_polygon(pixels, width, height, &points, fill);
-            draw_quad_outline(pixels, width, height, points, stroke, stroke_width);
-        }
-        _ => {}
+    let outline = shape_outline_points(start, end, shape, rotation_radians);
+    if outline.len() < 3 {
+        return;
     }
+    fill_polygon(pixels, width, height, &outline, fill);
+    draw_polygon_outline(pixels, width, height, &outline, stroke, stroke_width);
 }
-
 fn draw_serial_number(
     pixels: &mut [u8],
     width: u32,
@@ -2127,24 +2338,6 @@ fn draw_rect_outline(
     draw_quad_outline(pixels, width, height, points, color, stroke_width);
 }
 
-fn fill_ellipse(pixels: &mut [u8], width: u32, height: u32, rect: Rect, color: RgbaColor) {
-    if color.alpha == 0 {
-        return;
-    }
-    let center = rect.center();
-    let radius_x = (rect.width() / 2.0).max(0.5);
-    let radius_y = (rect.height() / 2.0).max(0.5);
-    for y in rect.top.floor() as i32..=rect.bottom.ceil() as i32 {
-        for x in rect.left.floor() as i32..=rect.right.ceil() as i32 {
-            let dx = (x as f32 + 0.5 - center.x) / radius_x;
-            let dy = (y as f32 + 0.5 - center.y) / radius_y;
-            if dx * dx + dy * dy <= 1.0 {
-                blend_pixel(pixels, width, height, x, y, color);
-            }
-        }
-    }
-}
-
 fn draw_ellipse_outline(
     pixels: &mut [u8],
     width: u32,
@@ -2216,7 +2409,14 @@ fn draw_quad_outline(
     }
 }
 
-fn draw_selection(pixels: &mut [u8], width: u32, height: u32, bounds: Rect, show_handles: bool) {
+fn draw_selection(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    bounds: Rect,
+    show_handles: bool,
+    show_rotation: bool,
+) {
     let color = RgbaColor::new(25, 190, 180, 255);
     draw_rect_outline(pixels, width, height, bounds, color, 2.0);
     if show_handles {
@@ -2232,6 +2432,13 @@ fn draw_selection(pixels: &mut [u8], width: u32, height: u32, bounds: Rect, show
         ] {
             draw_disc(pixels, width, height, point, 4.5, RgbaColor::WHITE);
             draw_disc(pixels, width, height, point, 3.0, color);
+        }
+        if show_rotation {
+            let anchor = Point::new((bounds.left + bounds.right) / 2.0, bounds.top);
+            let handle = Point::new(anchor.x, bounds.top - 24.0);
+            draw_thick_line(pixels, width, height, anchor, handle, color, 1.5);
+            draw_disc(pixels, width, height, handle, 5.0, RgbaColor::WHITE);
+            draw_disc(pixels, width, height, handle, 3.5, color);
         }
     }
 }
@@ -2383,13 +2590,13 @@ fn point_in_polygon(point: Point, polygon: &[Point]) -> bool {
     for current in 0..polygon.len() {
         let first = polygon[current];
         let second = polygon[previous];
-        if ((first.y > point.y) != (second.y > point.y))
-            && point.x
-                < (second.x - first.x) * (point.y - first.y)
-                    / (second.y - first.y).max(f32::EPSILON)
-                    + first.x
-        {
-            inside = !inside;
+        let crosses_scanline = (first.y > point.y) != (second.y > point.y);
+        if crosses_scanline {
+            let intersection_x =
+                (second.x - first.x) * (point.y - first.y) / (second.y - first.y) + first.x;
+            if point.x < intersection_x {
+                inside = !inside;
+            }
         }
         previous = current;
     }
@@ -3051,5 +3258,131 @@ mod tests {
         eprintln!("2K average: {average_2k:.2} ms; 4K average: {average_4k:.2} ms");
         assert!(average_2k <= 16.67, "2K average was {average_2k:.2} ms");
         assert!(average_4k <= 33.34, "4K average was {average_4k:.2} ms");
+    }
+    #[test]
+    fn clearing_annotations_is_undoable_and_background_rebase_preserves_elements() {
+        let mut document = document();
+        document.begin(
+            AnnotationTool::Rectangle,
+            Point::new(20.0, 20.0),
+            RgbaColor::RED,
+            4.0,
+        );
+        assert!(document.commit(Point::new(100.0, 80.0)));
+        assert!(document.has_annotations());
+
+        let replacement = vec![32; 320 * 180 * 4];
+        document.replace_original(replacement).unwrap();
+        assert_eq!(document.sample_original(Point::new(0.0, 0.0)).red, 32);
+        assert_eq!(document.elements().len(), 1);
+
+        assert!(document.clear_annotations());
+        assert!(!document.has_annotations());
+        assert!(document.can_undo());
+        assert!(document.undo());
+        assert!(document.has_annotations());
+        assert_eq!(document.elements().len(), 1);
+        assert_eq!(document.sample_original(Point::new(0.0, 0.0)).red, 32);
+        assert!(document.redo());
+        assert!(!document.has_annotations());
+    }
+
+    #[test]
+    fn shift_constrains_ellipse_creation_to_a_circle() {
+        let mut document = document();
+        document.begin_with_style(
+            AnnotationTool::Ellipse,
+            Point::new(40.0, 30.0),
+            ElementStyle::default(),
+            true,
+            false,
+        );
+        assert!(document.commit_with_modifiers(Point::new(150.0, 75.0), true, false));
+        let ElementKind::Shape { start, end, .. } = &document.elements()[0].kind else {
+            panic!("expected ellipse shape");
+        };
+        assert!(((end.x - start.x).abs() - (end.y - start.y).abs()).abs() < 0.001);
+    }
+
+    #[test]
+    fn shapes_rotate_from_the_top_handle_and_diamond_hit_test_uses_its_outline() {
+        let mut rectangle_document = document();
+        rectangle_document.begin(
+            AnnotationTool::Rectangle,
+            Point::new(50.0, 50.0),
+            RgbaColor::RED,
+            4.0,
+        );
+        assert!(rectangle_document.commit(Point::new(150.0, 110.0)));
+        let bounds = rectangle_document.elements()[0].bounds();
+        let handle = Point::new(bounds.center().x, bounds.top - 24.0);
+        rectangle_document.begin_with_style(
+            AnnotationTool::Select,
+            handle,
+            ElementStyle::default(),
+            false,
+            false,
+        );
+        assert!(rectangle_document.commit(Point::new(handle.x + 45.0, handle.y + 24.0)));
+        let ElementKind::Shape {
+            rotation_radians, ..
+        } = &rectangle_document.elements()[0].kind
+        else {
+            panic!("expected rectangle shape");
+        };
+        assert!(rotation_radians.abs() > 0.1);
+
+        let mut diamond = document();
+        diamond.begin(
+            AnnotationTool::Diamond,
+            Point::new(40.0, 40.0),
+            RgbaColor::RED,
+            4.0,
+        );
+        assert!(diamond.commit(Point::new(140.0, 100.0)));
+        diamond.clear_selection();
+        assert!(!diamond.select_at(Point::new(45.0, 45.0)));
+        assert!(diamond.select_at(Point::new(90.0, 70.0)));
+    }
+
+    #[test]
+    fn ellipse_and_diamond_fill_only_their_closed_interior() {
+        let filled_style = ElementStyle {
+            stroke: RgbaColor::TRANSPARENT,
+            fill: RgbaColor::RED,
+            stroke_width: 1.0,
+            ..ElementStyle::default()
+        };
+        let pixel = |document: &AnnotationDocument, x: u32, y: u32| {
+            let index = pixel_index(document.width(), x, y);
+            document.pixels()[index..index + 4].to_vec()
+        };
+        let red = vec![
+            RgbaColor::RED.red,
+            RgbaColor::RED.green,
+            RgbaColor::RED.blue,
+            RgbaColor::RED.alpha,
+        ];
+
+        for tool in [AnnotationTool::Ellipse, AnnotationTool::Diamond] {
+            let mut document = document();
+            document.begin_with_style(
+                tool,
+                Point::new(40.0, 30.0),
+                filled_style.clone(),
+                false,
+                false,
+            );
+            assert!(document.commit(Point::new(160.0, 110.0)), "{tool:?}");
+
+            assert_eq!(pixel(&document, 100, 50), red, "{tool:?} upper interior");
+            assert_eq!(pixel(&document, 100, 70), red, "{tool:?} center");
+            assert_eq!(pixel(&document, 100, 90), red, "{tool:?} lower interior");
+            assert_eq!(
+                pixel(&document, 45, 35),
+                vec![255, 255, 255, 255],
+                "{tool:?} exterior corner"
+            );
+        }
     }
 }

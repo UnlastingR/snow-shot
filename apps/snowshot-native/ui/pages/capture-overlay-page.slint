@@ -13,6 +13,7 @@ export component CaptureOverlayPage inherits Rectangle {
     in property <int> annotation-tool;
     in property <bool> annotation-can-undo;
     in property <bool> annotation-can-redo;
+    in property <bool> annotation-locked;
     in property <color> annotation-color;
     in property <string> annotation-color-label;
     in-out property <bool> ocr-visible;
@@ -62,6 +63,7 @@ export component CaptureOverlayPage inherits Rectangle {
     callback annotation-tool-requested(int, float, float, float, float);
     callback annotation-pointer-event(int, float, float, bool, bool);
     callback annotation-hit-test(float, float) -> bool;
+    callback annotation-handle-at(float, float) -> int;
     callback annotation-undo-requested();
     callback annotation-redo-requested();
     callback annotation-reset-requested();
@@ -122,6 +124,16 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <bool> annotation-pointer-down: false;
     private property <bool> selection-move-from-annotation: false;
     private property <bool> annotation-update-pending: false;
+    private property <int> annotation-hover-handle: 0;
+    private property <MouseCursor> annotation-mouse-cursor:
+        root.annotation-tool != 0 ? crosshair
+        : root.annotation-hover-handle == 2 || root.annotation-hover-handle == 6 ? nwse-resize
+        : root.annotation-hover-handle == 4 || root.annotation-hover-handle == 8 ? nesw-resize
+        : root.annotation-hover-handle == 3 || root.annotation-hover-handle == 7 ? ns-resize
+        : root.annotation-hover-handle == 5 || root.annotation-hover-handle == 9 ? ew-resize
+        : root.annotation-hover-handle == 10 ? none
+        : root.annotation-hover-handle == 1 ? move
+        : default;
     private property <bool> toolbar-dragging: false;
     private property <length> property-x: root.property-position-x * 1px;
     private property <length> property-y: root.property-position-y * 1px;
@@ -257,23 +269,23 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     function select-full-canvas() {
-        root.annotation-reset-requested();
-        root.ocr-visible = false;
-        root.window-preview-visible = false;
-        root.selecting = false;
-        root.has-selection = true;
-        if (!root.toolbar-dragging) {
-            root.toolbar-position-x = -1;
-            root.toolbar-position-y = -1;
+        if (!root.annotation-locked) {
+            root.ocr-visible = false;
+            root.window-preview-visible = false;
+            root.selecting = false;
+            root.has-selection = true;
+            if (!root.toolbar-dragging) {
+                root.toolbar-position-x = -1;
+                root.toolbar-position-y = -1;
+            }
+            root.selection-animation-enabled = true;
+            root.selection-animation-pending = true;
+            root.anchor-x = 0px;
+            root.anchor-y = 0px;
+            root.cursor-x = root.width;
+            root.cursor-y = root.height;
         }
-        root.selection-animation-enabled = true;
-        root.selection-animation-pending = true;
-        root.anchor-x = 0px;
-        root.anchor-y = 0px;
-        root.cursor-x = root.width;
-        root.cursor-y = root.height;
     }
-
     function begin-transform(pointer-x: length, pointer-y: length) {
         root.selection-animation-enabled = false;
         root.selection-animation-pending = false;
@@ -421,7 +433,8 @@ export component CaptureOverlayPage inherits Rectangle {
                     || event.kind == PointerEventKind.down) {
                 root.update-sample(self.mouse-x, self.mouse-y);
             }
-            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left
+                    && !root.annotation-locked) {
                 if (root.annotation-visible) {
                     root.annotation-reset-requested();
                 }
@@ -605,7 +618,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : TouchArea {
+            && !root.annotation-locked : TouchArea {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
@@ -634,7 +647,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : ResizeHandle {
+            && !root.annotation-locked : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nwse-resize;
@@ -653,7 +666,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : ResizeHandle {
+            && !root.annotation-locked : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nesw-resize;
@@ -672,7 +685,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : ResizeHandle {
+            && !root.annotation-locked : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nesw-resize;
@@ -691,7 +704,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : ResizeHandle {
+            && !root.annotation-locked : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nwse-resize;
@@ -710,7 +723,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : SelectionEdgeHandle {
+            && !root.annotation-locked : SelectionEdgeHandle {
         x: root.selection-left + 6px;
         y: root.selection-top - 6px;
         width: max(0px, root.selection-width - 12px);
@@ -731,7 +744,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : SelectionEdgeHandle {
+            && !root.annotation-locked : SelectionEdgeHandle {
         x: root.selection-right - 6px;
         y: root.selection-top + 6px;
         width: 12px;
@@ -752,7 +765,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : SelectionEdgeHandle {
+            && !root.annotation-locked : SelectionEdgeHandle {
         x: root.selection-left + 6px;
         y: root.selection-bottom - 6px;
         width: max(0px, root.selection-width - 12px);
@@ -773,7 +786,7 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && !root.annotation-visible : SelectionEdgeHandle {
+            && !root.annotation-locked : SelectionEdgeHandle {
         x: root.selection-left - 6px;
         y: root.selection-top + 6px;
         width: 12px;
@@ -821,16 +834,23 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     if root.presentation-active && root.has-selection
-            && root.annotation-visible : TouchArea {
+            && root.annotation-visible
+            && (root.annotation-locked || root.annotation-tool != 0) : TouchArea {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
         height: root.selection-height;
-        mouse-cursor: root.annotation-tool == 0 ? move : crosshair;
+        mouse-cursor: root.annotation-mouse-cursor;
 
         pointer-event(event) => {
             if (event.kind == PointerEventKind.move
                     || event.kind == PointerEventKind.down) {
+                root.annotation-hover-handle = root.annotation-tool == 0
+                    ? root.annotation-handle-at(
+                        self.mouse-x / max(1px, self.width),
+                        self.mouse-y / max(1px, self.height),
+                    )
+                    : 0;
                 root.update-sample(
                     self.x + self.mouse-x,
                     self.y + self.mouse-y,
@@ -881,6 +901,13 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.annotation-update-pending = true;
             } else if (event.kind == PointerEventKind.up
                     && root.selection-move-from-annotation) {
+                root.request-transform(
+                    0,
+                    self.x + self.mouse-x,
+                    self.y + self.mouse-y,
+                    false,
+                    false,
+                );
                 root.selection-move-from-annotation = false;
             } else if (event.kind == PointerEventKind.up
                     && root.annotation-pointer-down) {
@@ -908,6 +935,12 @@ export component CaptureOverlayPage inherits Rectangle {
                 }
             }
         }
+
+        changed has-hover => {
+            if (!self.has-hover) {
+                root.annotation-hover-handle = 0;
+            }
+        }
     }
 
     Timer {
@@ -929,6 +962,33 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    if root.presentation-active && root.annotation-tool == 0
+            && root.annotation-hover-handle == 10 : Rectangle {
+        z: 29;
+        x: max(2px, min(root.width - self.width - 2px, root.sample-x + 10px));
+        y: max(2px, min(root.height - self.height - 2px, root.sample-y + 10px));
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        border-width: 1px;
+        border-color: #d9d9d9;
+        background: #ffffffee;
+        drop-shadow-color: #00000024;
+        drop-shadow-blur: 4px;
+
+        Path {
+            x: 4px;
+            y: 4px;
+            width: 18px;
+            height: 18px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M 18 7 C 15 3 8 3 5 8 C 2 13 5 19 11 20 C 15 21 19 18 20 14 M 15 4 L 19 7 L 16 11";
+            fill: transparent;
+            stroke: #262626;
+            stroke-width: 2px;
+        }
+    }
     toolbar := CaptureToolbar {
         z: 30;
         visible: root.presentation-active && root.has-selection;
@@ -961,6 +1021,7 @@ export component CaptureOverlayPage inherits Rectangle {
         active-tool: root.annotation-tool;
         can-undo: root.annotation-can-undo;
         can-redo: root.annotation-can-redo;
+        has-annotations: root.annotation-locked;
         active-color: root.annotation-color;
         color-label: root.annotation-color-label;
         ocr-busy: root.ocr-busy;
@@ -981,6 +1042,7 @@ export component CaptureOverlayPage inherits Rectangle {
         }
         undo-clicked => { root.annotation-undo-requested(); }
         redo-clicked => { root.annotation-redo-requested(); }
+        clear-clicked => { root.annotation-reset-requested(); }
         drag-began => {
             root.toolbar-dragging = true;
             root.toolbar-drag-event(0, self.x / 1px, self.y / 1px);
@@ -1061,7 +1123,14 @@ export component CaptureOverlayPage inherits Rectangle {
 
     if root.presentation-active && root.magnifier-visible
             && !root.toolbar-dragging
-            && !root.annotation-pointer-down : ColorMagnifier {
+            && !root.annotation-pointer-down
+            && !(root.sample-x >= toolbar.x && root.sample-x <= toolbar.x + toolbar.width
+                && root.sample-y >= toolbar.y && root.sample-y <= toolbar.y + toolbar.height)
+            && !(property-panel.visible
+                && root.sample-x >= property-panel.x
+                && root.sample-x <= property-panel.x + property-panel.width
+                && root.sample-y >= property-panel.y
+                && root.sample-y <= property-panel.y + property-panel.height) : ColorMagnifier {
         z: 10;
         x: max(
             4px,

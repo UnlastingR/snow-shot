@@ -8,6 +8,7 @@ export component CaptureWindow inherits Window {
     in-out property <int> annotation-tool: 0;
     in-out property <bool> annotation-can-undo: false;
     in-out property <bool> annotation-can-redo: false;
+    in-out property <bool> annotation-locked: false;
     in-out property <color> annotation-color: #e84444;
     in-out property <string> annotation-color-label: "#E84444";
     in-out property <bool> ocr-visible: false;
@@ -57,6 +58,7 @@ export component CaptureWindow inherits Window {
     callback annotation-tool-requested(int, float, float, float, float);
     callback annotation-pointer-event(int, float, float, bool, bool);
     callback annotation-hit-test(float, float) -> bool;
+    callback annotation-handle-at(float, float) -> int;
     callback annotation-undo-requested();
     callback annotation-redo-requested();
     callback annotation-reset-requested();
@@ -125,6 +127,7 @@ export component CaptureWindow inherits Window {
         annotation-tool: root.annotation-tool;
         annotation-can-undo: root.annotation-can-undo;
         annotation-can-redo: root.annotation-can-redo;
+        annotation-locked: root.annotation-locked;
         annotation-color: root.annotation-color;
         annotation-color-label: root.annotation-color-label;
         ocr-visible <=> root.ocr-visible;
@@ -188,6 +191,7 @@ export component CaptureWindow inherits Window {
             root.annotation-pointer-event(phase, x, y, preserve-aspect, centered);
         }
         annotation-hit-test(x, y) => { return root.annotation-hit-test(x, y); }
+        annotation-handle-at(x, y) => { return root.annotation-handle-at(x, y); }
         annotation-undo-requested => { root.annotation-undo-requested(); }
         annotation-redo-requested => { root.annotation-redo-requested(); }
         annotation-reset-requested => { root.annotation-reset-requested(); }
