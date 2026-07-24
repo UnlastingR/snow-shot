@@ -74,6 +74,7 @@ export component CaptureWindow inherits Window {
     callback color-copy-requested();
     callback cursor-nudge-requested(int, int);
     callback floating-position-changed(int, float, float);
+    callback toolbar-drag-event(int, float, float);
     callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
@@ -216,6 +217,7 @@ export component CaptureWindow inherits Window {
         floating-position-changed(panel, x, y) => {
             root.floating-position-changed(panel, x, y);
         }
+        toolbar-drag-event(phase, x, y) => { root.toolbar-drag-event(phase, x, y); }
         window-target-requested(x, y, width, height) => {
             root.window-target-requested(x, y, width, height);
         }

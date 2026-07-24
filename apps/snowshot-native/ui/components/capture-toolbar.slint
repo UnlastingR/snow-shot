@@ -1,8 +1,8 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
 
 component ToolbarHandle inherits Rectangle {
-    callback drag-began(float, float);
-    callback drag-moved(float, float);
+    callback drag-began();
+    callback drag-moved();
     callback drag-ended();
 
     width: 22px;
@@ -23,9 +23,9 @@ component ToolbarHandle inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down
                     && event.button == PointerEventButton.left) {
-                root.drag-began(self.mouse-x / 1px, self.mouse-y / 1px);
+                root.drag-began();
             } else if (event.kind == PointerEventKind.move && self.pressed) {
-                root.drag-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                root.drag-moved();
             } else if (event.kind == PointerEventKind.up
                     || event.kind == PointerEventKind.cancel) {
                 root.drag-ended();
@@ -288,8 +288,8 @@ export component CaptureToolbar inherits Rectangle {
     callback tool-selected(int);
     callback undo-clicked();
     callback redo-clicked();
-    callback drag-began(float, float);
-    callback drag-moved(float, float);
+    callback drag-began();
+    callback drag-moved();
     callback drag-ended();
 
     private property <int> open-group: 0;
@@ -310,18 +310,8 @@ export component CaptureToolbar inherits Rectangle {
         x: 4px;
         y: 5px;
         height: 38px;
-        drag-began(local-x, local-y) => {
-            root.drag-began(
-                self.x / 1px + local-x,
-                self.y / 1px + local-y,
-            );
-        }
-        drag-moved(local-x, local-y) => {
-            root.drag-moved(
-                self.x / 1px + local-x,
-                self.y / 1px + local-y,
-            );
-        }
+        drag-began => { root.drag-began(); }
+        drag-moved => { root.drag-moved(); }
         drag-ended => { root.drag-ended(); }
     }
 

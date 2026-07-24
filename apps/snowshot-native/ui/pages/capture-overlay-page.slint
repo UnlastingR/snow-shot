@@ -79,6 +79,7 @@ export component CaptureOverlayPage inherits Rectangle {
     callback color-copy-requested();
     callback cursor-nudge-requested(int, int);
     callback floating-position-changed(int, float, float);
+    callback toolbar-drag-event(int, float, float);
     callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
@@ -121,14 +122,7 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <bool> annotation-pointer-down: false;
     private property <bool> selection-move-from-annotation: false;
     private property <bool> annotation-update-pending: false;
-    private property <length> toolbar-x: -1px;
-    private property <length> toolbar-y: -1px;
     private property <bool> toolbar-dragging: false;
-    private property <bool> toolbar-manual-position: false;
-    private property <float> toolbar-drag-start-x: 0;
-    private property <float> toolbar-drag-start-y: 0;
-    private property <length> toolbar-item-start-x: 0px;
-    private property <length> toolbar-item-start-y: 0px;
     private property <length> property-x: root.property-position-x * 1px;
     private property <length> property-y: root.property-position-y * 1px;
     private property <bool> property-dragging: false;
@@ -269,7 +263,8 @@ export component CaptureOverlayPage inherits Rectangle {
         root.selecting = false;
         root.has-selection = true;
         if (!root.toolbar-dragging) {
-            root.toolbar-manual-position = false;
+            root.toolbar-position-x = -1;
+            root.toolbar-position-y = -1;
         }
         root.selection-animation-enabled = true;
         root.selection-animation-pending = true;
@@ -333,7 +328,8 @@ export component CaptureOverlayPage inherits Rectangle {
         root.selecting = false;
         root.has-selection = false;
         if (!root.toolbar-dragging) {
-            root.toolbar-manual-position = false;
+            root.toolbar-position-x = -1;
+            root.toolbar-position-y = -1;
         }
         root.selection-animation-enabled = false;
         root.selection-animation-pending = false;
@@ -358,7 +354,8 @@ export component CaptureOverlayPage inherits Rectangle {
         root.selecting = false;
         root.has-selection = true;
         if (!root.toolbar-dragging) {
-            root.toolbar-manual-position = false;
+            root.toolbar-position-x = -1;
+            root.toolbar-position-y = -1;
         }
     }
 
@@ -935,10 +932,10 @@ export component CaptureOverlayPage inherits Rectangle {
     toolbar := CaptureToolbar {
         z: 30;
         visible: root.presentation-active && root.has-selection;
-        x: root.toolbar-manual-position
+        x: root.toolbar-position-x >= 0
             ? max(
                 SnowTheme.space-2,
-                min(root.width - self.width - SnowTheme.space-2, root.toolbar-x),
+                min(root.width - self.width - SnowTheme.space-2, root.toolbar-position-x * 1px),
             )
             : max(
                 SnowTheme.space-3,
@@ -948,10 +945,10 @@ export component CaptureOverlayPage inherits Rectangle {
                 ),
             );
         popup-below: true;
-        y: root.toolbar-manual-position
+        y: root.toolbar-position-y >= 0
             ? max(
                 SnowTheme.space-2,
-                min(root.height - root.toolbar-stack-height - SnowTheme.space-2, root.toolbar-y),
+                min(root.height - root.toolbar-stack-height - SnowTheme.space-2, root.toolbar-position-y * 1px),
             )
             : root.toolbar-auto-below
                 ? root.selection-bottom + SnowTheme.space-3
@@ -984,38 +981,20 @@ export component CaptureOverlayPage inherits Rectangle {
         }
         undo-clicked => { root.annotation-undo-requested(); }
         redo-clicked => { root.annotation-redo-requested(); }
-        drag-began(pointer-x, pointer-y) => {
+        drag-began => {
             root.toolbar-dragging = true;
-            root.toolbar-manual-position = true;
-            root.toolbar-drag-start-x = self.x / 1px + pointer-x;
-            root.toolbar-drag-start-y = self.y / 1px + pointer-y;
-            root.toolbar-item-start-x = self.x;
-            root.toolbar-item-start-y = self.y;
-            root.toolbar-x = self.x;
-            root.toolbar-y = self.y;
+            root.toolbar-drag-event(0, self.x / 1px, self.y / 1px);
         }
-        drag-moved(pointer-x, pointer-y) => {
+        drag-moved => {
             if (root.toolbar-dragging) {
-                root.toolbar-x = max(
-                    SnowTheme.space-2,
-                    min(
-                        root.width - self.width - SnowTheme.space-2,
-                        root.toolbar-item-start-x
-                            + (self.x / 1px + pointer-x - root.toolbar-drag-start-x) * 1px,
-                    ),
-                );
-                root.toolbar-y = max(
-                    SnowTheme.space-2,
-                    min(
-                        root.height - root.toolbar-stack-height - SnowTheme.space-2,
-                        root.toolbar-item-start-y
-                            + (self.y / 1px + pointer-y - root.toolbar-drag-start-y) * 1px,
-                    ),
-                );
+                root.toolbar-drag-event(1, 0, 0);
             }
         }
         drag-ended => {
-            root.toolbar-dragging = false;
+            if (root.toolbar-dragging) {
+                root.toolbar-dragging = false;
+                root.toolbar-drag-event(2, 0, 0);
+            }
             keyboard-focus.focus();
         }
     }

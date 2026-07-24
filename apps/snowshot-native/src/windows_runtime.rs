@@ -41,6 +41,9 @@ use crate::{AppTray, AppWindow, CaptureWindow};
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
 const ESCAPE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const TOOLBAR_WIDTH: f32 = 840.0;
+const TOOLBAR_MAX_STACK_HEIGHT: f32 = 198.0;
+const TOOLBAR_VIEWPORT_MARGIN: f32 = 8.0;
 #[cfg(test)]
 const PIN_MIN_WIDTH: f32 = 96.0;
 #[cfg(test)]
@@ -73,6 +76,15 @@ struct SampledColor {
     color: RgbaColor,
     x: i32,
     y: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolbarDragState {
+    cursor_x: i32,
+    cursor_y: i32,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
 }
 
 struct AnnotationState {
@@ -500,6 +512,61 @@ fn bind_capture_callbacks(
     pins: SharedPins,
     ocr: SharedOcrContext,
 ) {
+    let toolbar_drag_state = Rc::new(RefCell::new(None::<ToolbarDragState>));
+    let toolbar_drag_capture = capture.as_weak();
+    let toolbar_drag_state_for_callback = Rc::clone(&toolbar_drag_state);
+    capture.on_toolbar_drag_event(move |phase, item_x, item_y| {
+        let Some(capture) = toolbar_drag_capture.upgrade() else {
+            return;
+        };
+        match phase {
+            0 => {
+                let mut cursor = POINT::default();
+                // SAFETY: GetCursorPos writes the current desktop cursor into a valid POINT.
+                if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+                    *toolbar_drag_state_for_callback.borrow_mut() = Some(ToolbarDragState {
+                        cursor_x: cursor.x,
+                        cursor_y: cursor.y,
+                        x: item_x,
+                        y: item_y,
+                        scale_factor: capture.window().scale_factor().max(0.1),
+                    });
+                    capture.set_toolbar_position_x(item_x);
+                    capture.set_toolbar_position_y(item_y);
+                }
+            }
+            1 => {
+                let mut cursor = POINT::default();
+                // SAFETY: GetCursorPos writes the current desktop cursor into a valid POINT.
+                if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+                    return;
+                }
+                let mut drag = toolbar_drag_state_for_callback.borrow_mut();
+                let Some(state) = drag.as_mut() else {
+                    return;
+                };
+                let size = capture.window().size();
+                let logical_width = size.width as f32 / state.scale_factor;
+                let logical_height = size.height as f32 / state.scale_factor;
+                let max_x = (logical_width - TOOLBAR_WIDTH - TOOLBAR_VIEWPORT_MARGIN)
+                    .max(TOOLBAR_VIEWPORT_MARGIN);
+                let max_y = (logical_height - TOOLBAR_MAX_STACK_HEIGHT - TOOLBAR_VIEWPORT_MARGIN)
+                    .max(TOOLBAR_VIEWPORT_MARGIN);
+                state.x = (state.x + (cursor.x - state.cursor_x) as f32 / state.scale_factor)
+                    .clamp(TOOLBAR_VIEWPORT_MARGIN, max_x);
+                state.y = (state.y + (cursor.y - state.cursor_y) as f32 / state.scale_factor)
+                    .clamp(TOOLBAR_VIEWPORT_MARGIN, max_y);
+                state.cursor_x = cursor.x;
+                state.cursor_y = cursor.y;
+                capture.set_toolbar_position_x(state.x);
+                capture.set_toolbar_position_y(state.y);
+            }
+            _ => {
+                toolbar_drag_state_for_callback.borrow_mut().take();
+            }
+        }
+    });
+
     let app_weak = app.as_weak();
     let confirm_capture_window = capture_window.clone();
     let confirm_session = Arc::clone(&session);

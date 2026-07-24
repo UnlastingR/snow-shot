@@ -1377,8 +1377,10 @@ fn transform_rect(
     if handle == SelectionHandle::Move {
         let width = bounds.width();
         let height = bounds.height();
-        let left = (bounds.left + dx).clamp(0.0, canvas_width as f32 - width);
-        let top = (bounds.top + dy).clamp(0.0, canvas_height as f32 - height);
+        let max_left = (canvas_width as f32 - width).max(0.0);
+        let max_top = (canvas_height as f32 - height).max(0.0);
+        let left = (bounds.left + dx).clamp(0.0, max_left);
+        let top = (bounds.top + dy).clamp(0.0, max_top);
         return Rect {
             left,
             top,
@@ -2073,7 +2075,8 @@ fn draw_arrow(
     if length < 2.0 {
         return;
     }
-    let head_length = (length * 0.24).clamp(stroke_width * 3.0, 28.0);
+    let minimum_head_length = (stroke_width * 3.0).min(28.0);
+    let head_length = (length * 0.24).clamp(minimum_head_length, 28.0);
     let angle = dy.atan2(dx);
     for head_angle in [
         angle + std::f32::consts::PI - 0.55,
@@ -2814,6 +2817,44 @@ mod tests {
         assert!(document.undo());
         assert!(document.elements().is_empty());
         assert!(!document.undo());
+    }
+
+    #[test]
+    fn wide_arrow_strokes_and_oversized_moves_do_not_panic() {
+        let mut document = document();
+        document.begin(
+            AnnotationTool::Arrow,
+            Point::new(30.0, 60.0),
+            RgbaColor::RED,
+            3.0,
+        );
+        assert!(document.commit(Point::new(220.0, 60.0)));
+        for stroke_width in [9.0, 9.4, 16.0, 32.0, 64.0] {
+            assert!(document.update_selected_style(&StylePatch {
+                stroke_width: Some(stroke_width),
+                ..StylePatch::default()
+            }));
+            assert!(document.pixels().iter().any(|channel| *channel != 0));
+        }
+
+        let oversized = Rect {
+            left: -20.0,
+            top: -10.0,
+            right: 400.0,
+            bottom: 260.0,
+        };
+        let moved = transform_rect(
+            oversized,
+            SelectionHandle::Move,
+            Point::new(0.0, 0.0),
+            Point::new(12.0, 9.0),
+            false,
+            false,
+            320,
+            180,
+        );
+        assert_eq!(moved.left, 0.0);
+        assert_eq!(moved.top, 0.0);
     }
 
     #[test]
