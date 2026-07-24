@@ -257,6 +257,13 @@ impl AnnotationElement {
             ElementKind::Text { bounds, .. } => *bounds,
         }
     }
+
+    pub fn supports_resize(&self) -> bool {
+        matches!(
+            self.kind,
+            ElementKind::Shape { .. } | ElementKind::Text { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -858,9 +865,21 @@ impl AnnotationDocument {
     }
 
     pub fn selection_handle_at(&self, point: Point) -> SelectionHandle {
-        self.selected_bounds()
-            .map(|bounds| hit_selection_handle(bounds, point))
+        self.selected
+            .and_then(|id| self.element(id))
+            .map(|element| selection_handle_for_element(element, point))
             .unwrap_or(SelectionHandle::None)
+    }
+
+    pub fn has_interactive_target_at(&self, point: Point) -> bool {
+        let point = self.clamp_point(point);
+        self.selected
+            .and_then(|id| self.element(id))
+            .is_some_and(|element| {
+                selection_handle_for_element(element, point) != SelectionHandle::None
+            })
+            || self.hit_element(point).is_some()
+            || self.hit_ocr(point).is_some()
     }
 
     pub fn delete_selected(&mut self) -> bool {
@@ -1011,7 +1030,7 @@ impl AnnotationDocument {
         let current_handle = self
             .selected
             .and_then(|id| self.element(id))
-            .map(|element| hit_selection_handle(element.bounds(), point))
+            .map(|element| selection_handle_for_element(element, point))
             .unwrap_or(SelectionHandle::None);
         let (id, handle) = if current_handle != SelectionHandle::None {
             (self.selected, current_handle)
@@ -1133,12 +1152,18 @@ impl AnnotationDocument {
     }
 
     fn draw_selection_preview(&mut self) {
-        let selected_bounds = self
+        let selected = self
             .selected
             .and_then(|id| self.element(id))
-            .map(AnnotationElement::bounds);
-        if let Some(bounds) = selected_bounds {
-            draw_selection(&mut self.preview_pixels, self.width, self.height, bounds);
+            .map(|element| (element.bounds(), element.supports_resize()));
+        if let Some((bounds, true)) = selected {
+            draw_selection(
+                &mut self.preview_pixels,
+                self.width,
+                self.height,
+                bounds,
+                true,
+            );
         }
         let selected_ocr_points = self
             .selected_ocr
@@ -1276,6 +1301,16 @@ fn distance_to_segment(point: Point, start: Point, end: Point) -> f32 {
     let progress =
         (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
     point.distance(Point::new(start.x + dx * progress, start.y + dy * progress))
+}
+
+fn selection_handle_for_element(element: &AnnotationElement, point: Point) -> SelectionHandle {
+    if element.supports_resize() {
+        hit_selection_handle(element.bounds(), point)
+    } else if hit_element(element, point) {
+        SelectionHandle::Move
+    } else {
+        SelectionHandle::None
+    }
 }
 
 fn hit_selection_handle(bounds: Rect, point: Point) -> SelectionHandle {
@@ -2178,21 +2213,23 @@ fn draw_quad_outline(
     }
 }
 
-fn draw_selection(pixels: &mut [u8], width: u32, height: u32, bounds: Rect) {
+fn draw_selection(pixels: &mut [u8], width: u32, height: u32, bounds: Rect, show_handles: bool) {
     let color = RgbaColor::new(25, 190, 180, 255);
     draw_rect_outline(pixels, width, height, bounds, color, 2.0);
-    for point in [
-        Point::new(bounds.left, bounds.top),
-        Point::new((bounds.left + bounds.right) / 2.0, bounds.top),
-        Point::new(bounds.right, bounds.top),
-        Point::new(bounds.right, (bounds.top + bounds.bottom) / 2.0),
-        Point::new(bounds.right, bounds.bottom),
-        Point::new((bounds.left + bounds.right) / 2.0, bounds.bottom),
-        Point::new(bounds.left, bounds.bottom),
-        Point::new(bounds.left, (bounds.top + bounds.bottom) / 2.0),
-    ] {
-        draw_disc(pixels, width, height, point, 4.5, RgbaColor::WHITE);
-        draw_disc(pixels, width, height, point, 3.0, color);
+    if show_handles {
+        for point in [
+            Point::new(bounds.left, bounds.top),
+            Point::new((bounds.left + bounds.right) / 2.0, bounds.top),
+            Point::new(bounds.right, bounds.top),
+            Point::new(bounds.right, (bounds.top + bounds.bottom) / 2.0),
+            Point::new(bounds.right, bounds.bottom),
+            Point::new((bounds.left + bounds.right) / 2.0, bounds.bottom),
+            Point::new(bounds.left, bounds.bottom),
+            Point::new(bounds.left, (bounds.top + bounds.bottom) / 2.0),
+        ] {
+            draw_disc(pixels, width, height, point, 4.5, RgbaColor::WHITE);
+            draw_disc(pixels, width, height, point, 3.0, color);
+        }
     }
 }
 
@@ -2729,6 +2766,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_shapes_and_text_expose_resize_handles() {
+        for (tool, expected) in [
+            (AnnotationTool::Pen, false),
+            (AnnotationTool::Line, false),
+            (AnnotationTool::Arrow, false),
+            (AnnotationTool::Rectangle, true),
+            (AnnotationTool::Ellipse, true),
+            (AnnotationTool::Diamond, true),
+            (AnnotationTool::Highlighter, false),
+            (AnnotationTool::SerialNumber, false),
+            (AnnotationTool::Text, true),
+            (AnnotationTool::Mosaic, false),
+            (AnnotationTool::Blur, false),
+        ] {
+            let mut document = document();
+            document.begin(tool, Point::new(20.0, 20.0), RgbaColor::RED, 6.0);
+            assert!(document.commit(Point::new(90.0, 70.0)), "{tool:?}");
+            assert_eq!(
+                document.elements()[0].supports_resize(),
+                expected,
+                "{tool:?}"
+            );
+            if !expected {
+                assert!(matches!(
+                    document.selection_handle_at(Point::new(55.0, 45.0)),
+                    SelectionHandle::Move | SelectionHandle::None
+                ));
+            }
+        }
+    }
     #[test]
     fn one_freehand_drag_is_one_history_entry() {
         let mut document = document();

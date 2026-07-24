@@ -65,14 +65,7 @@ struct CaptureSession {
     annotation: Mutex<Option<AnnotationState>>,
     settings: Mutex<NativeSettings>,
     sampled_color: Mutex<Option<SampledColor>>,
-    floating_panels: Mutex<FloatingPanelPositions>,
     color_format: AtomicU8,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct FloatingPanelPositions {
-    toolbar: Option<FloatPoint>,
-    properties: Option<FloatPoint>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -842,19 +835,22 @@ fn bind_capture_callbacks(
         }
     });
 
-    let floating_session = Arc::clone(&session);
-    capture.on_floating_position_changed(move |panel, x, y| {
-        if let Ok(mut positions) = floating_session.floating_panels.lock() {
-            let position = Some(FloatPoint {
-                x: x.max(0.0),
-                y: y.max(0.0),
-            });
-            match panel {
-                0 => positions.toolbar = position,
-                1 => positions.properties = position,
-                _ => {}
-            }
-        }
+    let annotation_hit_session = Arc::clone(&session);
+    capture.on_annotation_hit_test(move |normalized_x, normalized_y| {
+        annotation_hit_session
+            .annotation
+            .lock()
+            .ok()
+            .and_then(|annotation| {
+                annotation.as_ref().map(|annotation| {
+                    let point = Point::new(
+                        normalized_x.clamp(0.0, 1.0) * annotation.document.width() as f32,
+                        normalized_y.clamp(0.0, 1.0) * annotation.document.height() as f32,
+                    );
+                    annotation.document.has_interactive_target_at(point)
+                })
+            })
+            .unwrap_or(false)
     });
 
     let app_weak = app.as_weak();
@@ -1002,25 +998,6 @@ fn bind_capture_callbacks(
                             let sample = SampledColor { color, x: 0, y: 0 };
                             let value = format_color_value(sample.color, format);
                             let _ = snow_shot_clipboard::write_text(&value);
-                        }
-                    }
-                    if phase == 2 {
-                        let next_serial =
-                            annotation_session
-                                .annotation
-                                .lock()
-                                .ok()
-                                .and_then(|annotation| {
-                                    annotation.as_ref().and_then(|annotation| {
-                                        (annotation.tool == 4)
-                                            .then(|| annotation.document.next_serial_number())
-                                    })
-                                });
-                        if let Some(next_serial) = next_serial
-                            && let Ok(mut settings) = annotation_session.settings.lock()
-                        {
-                            settings.set_serial_number(next_serial);
-                            let _ = settings.save();
                         }
                     }
                     if let Some(capture) = annotation_capture.upgrade()
@@ -1537,16 +1514,6 @@ fn create_capture_window(
         capture.set_last_line(settings.last_line);
         capture.set_last_pen(settings.last_pen);
         capture.set_last_privacy(settings.last_privacy);
-    }
-    if let Ok(positions) = session.floating_panels.lock() {
-        if let Some(position) = positions.toolbar {
-            capture.set_toolbar_position_x(position.x);
-            capture.set_toolbar_position_y(position.y);
-        }
-        if let Some(position) = positions.properties {
-            capture.set_property_position_x(position.x);
-            capture.set_property_position_y(position.y);
-        }
     }
     bind_capture_callbacks(
         app,
@@ -2170,11 +2137,36 @@ fn format_sample(sample: SampledColor, format: u8) -> String {
 
 fn format_color_value(color: RgbaColor, format: u8) -> String {
     match format % 5 {
-        0 => color.display_hex(),
-        1 => color.format_rgb(),
-        2 => color.format_hsv(),
-        3 => color.format_hsl(),
-        _ => color.format_cmyk(),
+        0 => color.hex_rgb(),
+        1 => format!("rgb({}, {}, {})", color.red, color.green, color.blue),
+        2 => {
+            let hsv = color.to_hsv();
+            format!(
+                "hsv({:.0}°, {:.0}%, {:.0}%)",
+                hsv.hue,
+                hsv.saturation * 100.0,
+                hsv.value * 100.0
+            )
+        }
+        3 => {
+            let hsl = color.to_hsl();
+            format!(
+                "hsl({:.0}°, {:.0}%, {:.0}%)",
+                hsl.hue,
+                hsl.saturation * 100.0,
+                hsl.lightness * 100.0
+            )
+        }
+        _ => {
+            let cmyk = color.to_cmyk();
+            format!(
+                "cmyk({:.0}%, {:.0}%, {:.0}%, {:.0}%)",
+                cmyk.cyan * 100.0,
+                cmyk.magenta * 100.0,
+                cmyk.yellow * 100.0,
+                cmyk.key * 100.0
+            )
+        }
     }
 }
 
@@ -2184,7 +2176,7 @@ fn ensure_annotation_state(
     tool: i32,
 ) -> Result<AnnotationUiSnapshot, String> {
     let selected_tool = annotation_tool(tool).unwrap_or(AnnotationTool::Select);
-    let (style, ocr_style, serial_number) = {
+    let (style, ocr_style) = {
         let mut settings = session
             .settings
             .lock()
@@ -2192,20 +2184,22 @@ fn ensure_annotation_state(
         settings.remember_tool(tool);
         let style = settings.style(selected_tool);
         let ocr_style = settings.ocr_style.clone();
-        let serial_number = settings.serial_number;
         let _ = settings.save();
-        (style, ocr_style, serial_number)
+        (style, ocr_style)
     };
     if let Ok(mut annotation) = session.annotation.lock()
         && let Some(annotation) = annotation.as_mut()
         && annotation.region == region
     {
         let previous_tool = annotation.tool;
-        if tool == 7 && previous_tool != 7 {
-            annotation.previous_tool = previous_tool;
-        } else if tool != 7 {
-            annotation.previous_tool = tool;
+        if tool == 7 {
+            if previous_tool != 7 {
+                annotation.previous_tool = previous_tool;
+            }
+            annotation.tool = tool;
+            return Ok(annotation_snapshot(annotation));
         }
+        annotation.previous_tool = tool;
         annotation.tool = tool;
         annotation.style = style;
         annotation.color = annotation.style.stroke;
@@ -2230,7 +2224,6 @@ fn ensure_annotation_state(
     )
     .map_err(|error| error.to_string())?;
     document.configure_ocr_style(ocr_style);
-    document.configure_next_serial_number(serial_number);
     let annotation = AnnotationState {
         region,
         document,
@@ -2386,7 +2379,6 @@ fn update_annotation_color_alpha(
 enum PersistedAnnotationStyle {
     Tool(i32, ElementStyle),
     Ocr(OcrLayerStyle),
-    Serial(u32),
 }
 
 fn persist_annotation_style(
@@ -2407,7 +2399,6 @@ fn persist_annotation_style(
             }
         }
         PersistedAnnotationStyle::Ocr(style) => settings.set_ocr_style(style),
-        PersistedAnnotationStyle::Serial(number) => settings.set_serial_number(number),
     }
     settings.save()
 }
@@ -2440,10 +2431,7 @@ fn update_annotation_style_value(
         } else if field == 7 {
             let number = value.round().max(1.0) as u32;
             annotation.document.update_serial_number(number);
-            (
-                annotation_snapshot(annotation),
-                Some(PersistedAnnotationStyle::Serial(number)),
-            )
+            (annotation_snapshot(annotation), None)
         } else {
             let patch = match field {
                 0 => StylePatch {

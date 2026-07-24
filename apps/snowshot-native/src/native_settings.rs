@@ -11,18 +11,12 @@ use windows::core::HSTRING;
 
 const SETTINGS_VERSION: u32 = 1;
 
-const fn default_serial_number() -> u32 {
-    1
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeSettings {
     pub version: u32,
     pub tool_styles: BTreeMap<String, ElementStyle>,
     #[serde(default)]
     pub ocr_style: OcrLayerStyle,
-    #[serde(default = "default_serial_number")]
-    pub serial_number: u32,
     pub last_shape: i32,
     pub last_line: i32,
     pub last_pen: i32,
@@ -35,7 +29,6 @@ impl Default for NativeSettings {
             version: SETTINGS_VERSION,
             tool_styles: BTreeMap::new(),
             ocr_style: OcrLayerStyle::default(),
-            serial_number: default_serial_number(),
             last_shape: 8,
             last_line: 3,
             last_pen: 1,
@@ -108,10 +101,6 @@ impl NativeSettings {
 
     pub fn set_ocr_style(&mut self, style: OcrLayerStyle) {
         self.ocr_style = style;
-    }
-
-    pub fn set_serial_number(&mut self, number: u32) {
-        self.serial_number = number.max(1);
     }
 
     pub fn remember_tool(&mut self, tool_id: i32) {
@@ -223,18 +212,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(settings.ocr_style, OcrLayerStyle::default());
-        assert_eq!(settings.serial_number, 1);
     }
 
     #[test]
-    fn ocr_style_and_serial_value_are_persistable() {
+    fn ocr_style_is_persistable_without_serial_memory() {
         let mut settings = NativeSettings::default();
         settings.ocr_style.visible = false;
         settings.ocr_style.blur_strength = 1.75;
-        settings.set_serial_number(12);
         let encoded = serde_json::to_vec(&settings).unwrap();
         let decoded: NativeSettings = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded.ocr_style, settings.ocr_style);
-        assert_eq!(decoded.serial_number, 12);
+        assert!(
+            !String::from_utf8(encoded)
+                .unwrap()
+                .contains("serial_number")
+        );
     }
 }

@@ -1,45 +1,5 @@
-import { LineEdit, Slider } from "std-widgets.slint";
+import { LineEdit, Slider, SpinBox } from "std-widgets.slint";
 import { SnowTheme } from "../theme/snow-theme.slint";
-
-component EightDotHandle inherits Rectangle {
-    callback drag-began(float, float, float, float);
-    callback drag-moved(float, float);
-    callback drag-ended();
-    width: 24px;
-    background: area.has-hover ? #ffffff12 : transparent;
-    border-radius: SnowTheme.radius-sm;
-
-    for dot[index] in 8 : Rectangle {
-        x: 7px + mod(index, 2) * 6px;
-        y: (parent.height - 21px) / 2 + floor(index / 2) * 6px;
-        width: 3px;
-        height: 3px;
-        border-radius: 2px;
-        background: area.has-hover ? #d9dde2 : #8f959d;
-    }
-    area := TouchArea {
-        mouse-cursor: grab;
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.down
-                    && event.button == PointerEventButton.left) {
-                root.drag-began(
-                    root.x / 1px + self.mouse-x / 1px,
-                    root.y / 1px + self.mouse-y / 1px,
-                    root.x / 1px,
-                    root.y / 1px,
-                );
-            } else if (event.kind == PointerEventKind.move && self.pressed) {
-                root.drag-moved(
-                    root.x / 1px + self.mouse-x / 1px,
-                    root.y / 1px + self.mouse-y / 1px,
-                );
-            } else if (event.kind == PointerEventKind.up
-                    || event.kind == PointerEventKind.cancel) {
-                root.drag-ended();
-            }
-        }
-    }
-}
 
 component SmallButton inherits Rectangle {
     in property <string> label;
@@ -49,12 +9,12 @@ component SmallButton inherits Rectangle {
     height: 26px;
     border-radius: SnowTheme.radius-sm;
     border-width: root.selected ? 1px : 0px;
-    border-color: SnowTheme.focus-ring;
-    background: root.selected ? #168c8259
-        : area.pressed ? #ffffff22 : area.has-hover ? #ffffff16 : #ffffff0b;
+    border-color: #1677ff;
+    background: root.selected ? #e6f4ff
+        : area.pressed ? #d6e4ff : area.has-hover ? #f0f5ff : #f5f5f5;
     Text {
         text: root.label;
-        color: #eef0f2;
+        color: #262626;
         font-size: 11px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -69,7 +29,7 @@ component ColorPreset inherits Rectangle {
     height: 22px;
     border-radius: 5px;
     border-width: 1px;
-    border-color: area.has-hover ? white : #ffffff55;
+    border-color: area.has-hover ? #1677ff : #bfbfbf;
     background: root.swatch;
     area := TouchArea { clicked => { root.clicked(); } }
 }
@@ -87,18 +47,18 @@ component ColorField inherits Rectangle {
     Text {
         width: 30px;
         text: root.label;
-        color: #aeb4bc;
+        color: #595959;
         font-size: 11px;
         vertical-alignment: center;
     }
     Rectangle {
-        x: 32px;
+        x: 12px;
         y: 5px;
         width: 20px;
         height: 20px;
         border-radius: 4px;
         border-width: 1px;
-        border-color: #ffffff4a;
+        border-color: #d9d9d9;
         background: root.swatch;
         TouchArea { clicked => { root.selected(); } }
     }
@@ -124,19 +84,19 @@ component NumericControl inherits Rectangle {
     in property <float> minimum;
     in property <float> maximum;
     callback changed(float);
-    width: 126px;
+    width: 204px;
     height: 34px;
 
     Text {
-        width: 36px;
+        width: 56px;
         text: root.label;
-        color: #aeb4bc;
+        color: #595959;
         font-size: 10px;
         vertical-alignment: center;
     }
     Slider {
-        x: 38px;
-        width: 62px;
+        x: 70px;
+        width: 88px;
         y: 5px;
         height: 24px;
         minimum: root.minimum;
@@ -145,16 +105,44 @@ component NumericControl inherits Rectangle {
         changed(value) => { root.changed(value); }
     }
     Text {
-        x: 102px;
-        width: 24px;
+        x: 168px;
+        width: 34px;
         text: round(root.value);
-        color: #eef0f2;
+        color: #262626;
         font-size: 10px;
         horizontal-alignment: right;
         vertical-alignment: center;
     }
 }
 
+component NumericInput inherits Rectangle {
+    in property <string> label;
+    in property <float> value;
+    in property <int> minimum;
+    in property <int> maximum;
+    callback changed(float);
+    callback input-focus-changed(bool);
+    width: 176px;
+    height: 34px;
+    Text {
+        width: 42px;
+        text: root.label;
+        color: #595959;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    input := SpinBox {
+        x: 44px;
+        y: 2px;
+        width: 128px;
+        height: 30px;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        edited(value) => { root.changed(value); }
+        changed has-focus => { root.input-focus-changed(self.has-focus); }
+    }
+}
 export component AnnotationPropertyPanel inherits Rectangle {
     in property <int> active-tool: 0;
     in property <bool> has-selected-element: false;
@@ -196,11 +184,11 @@ export component AnnotationPropertyPanel inherits Rectangle {
     callback input-focus-changed(bool);
 
     private property <float> active-color-alpha:
-        root.active-color-slot == 1 ? root.fill-color.alpha * 100
-        : root.active-color-slot == 2 ? root.text-color.alpha * 100
-        : root.stroke-color.alpha * 100;
+        root.active-color-slot == 1 ? root.fill-color.alpha / 2.55
+        : root.active-color-slot == 2 ? root.text-color.alpha / 2.55
+        : root.stroke-color.alpha / 2.55;
     private property <int> effective-tool:
-        root.active-tool == 0 && root.selected-annotation-tool != 0
+        (root.active-tool == 0 || root.active-tool == 7 || root.active-tool == 11) && root.selected-annotation-tool != 0
             ? root.selected-annotation-tool
             : root.active-tool;
     private property <bool> is-shape:
@@ -214,31 +202,21 @@ export component AnnotationPropertyPanel inherits Rectangle {
     private property <bool> is-text: root.effective-tool == 13;
     private property <bool> is-serial: root.effective-tool == 4;
 
-    width: 790px;
-    height: root.is-text || root.is-serial ? 176px : 142px;
+    width: 840px;
+    height: root.is-text ? 142px : 108px;
     border-radius: SnowTheme.radius-md;
     border-width: 1px;
-    border-color: #ffffff24;
-    background: #24272bf0;
-    drop-shadow-color: #00000055;
-    drop-shadow-blur: 14px;
-    drop-shadow-offset-y: 5px;
+    border-color: #d9d9d9;
+    background: white;
+    drop-shadow-color: #00000026;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 3px;
 
-    EightDotHandle {
-        x: 4px;
-        y: 4px;
-        height: parent.height - 8px;
-        drag-began(pointer-x, pointer-y, item-x, item-y) => {
-            root.drag-began(pointer-x, pointer-y, root.x / 1px, root.y / 1px);
-        }
-        drag-moved(pointer-x, pointer-y) => { root.drag-moved(pointer-x, pointer-y); }
-        drag-ended => { root.drag-ended(); }
-    }
 
     VerticalLayout {
-        x: 32px;
+        x: 12px;
         y: 6px;
-        width: parent.width - 38px;
+        width: parent.width - 24px;
         height: parent.height - 12px;
         spacing: 2px;
 
@@ -350,13 +328,14 @@ export component AnnotationPropertyPanel inherits Rectangle {
                 maximum: 100;
                 changed(value) => { root.color-alpha-changed(root.active-color-slot, value); }
             }
-            NumericControl {
+            NumericInput {
                 visible: root.is-pen || root.is-effect;
-                label: "笔刷";
+                label: "笔刷大小";
                 value: root.brush-size;
                 minimum: 2;
                 maximum: 128;
                 changed(value) => { root.style-value-changed(2, value); }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
             }
             NumericControl {
                 visible: root.is-effect || root.ocr-selected;
@@ -366,13 +345,14 @@ export component AnnotationPropertyPanel inherits Rectangle {
                 maximum: 100;
                 changed(value) => { root.style-value-changed(3, value); }
             }
-            NumericControl {
+            NumericInput {
                 visible: root.is-text || root.is-serial;
                 label: "字号";
                 value: root.font-size;
                 minimum: 8;
                 maximum: 128;
                 changed(value) => { root.style-value-changed(4, value); }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
             }
         }
 
@@ -430,8 +410,10 @@ export component AnnotationPropertyPanel inherits Rectangle {
                 horizontal-stretch: 1;
                 visible: root.ocr-selected || root.is-shape || root.is-line
                     || root.is-pen || root.is-serial || root.is-text;
-                text: "颜色槽支持 HEX / RGB / HSV 输入和独立透明度";
-                color: #828891;
+                text: root.is-serial
+                    ? "本次截图自动编号：" + round(root.serial-number)
+                    : "颜色槽支持 HEX / RGB / HSV 输入和独立透明度";
+                color: #8c8c8c;
                 font-size: 10px;
                 vertical-alignment: center;
             }
@@ -468,7 +450,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
             Text {
                 width: 28px;
                 text: "文本";
-                color: #aeb4bc;
+                color: #595959;
                 font-size: 11px;
                 vertical-alignment: center;
             }
@@ -480,23 +462,6 @@ export component AnnotationPropertyPanel inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
-            visible: root.is-serial || root.selected-is-serial;
-            spacing: 4px;
-            NumericControl {
-                label: "序号";
-                value: root.serial-number;
-                minimum: 1;
-                maximum: 999;
-                changed(value) => { root.style-value-changed(7, value); }
-            }
-            Text {
-                horizontal-stretch: 1;
-                text: "下一枚序号会继续递增；选择已有序号后可单独修改";
-                color: #828891;
-                font-size: 10px;
-                vertical-alignment: center;
-            }
-        }
+
     }
 }

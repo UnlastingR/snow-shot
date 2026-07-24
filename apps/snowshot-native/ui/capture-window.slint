@@ -56,6 +56,7 @@ export component CaptureWindow inherits Window {
     callback ocr-copy-requested();
     callback annotation-tool-requested(int, float, float, float, float);
     callback annotation-pointer-event(int, float, float, bool, bool);
+    callback annotation-hit-test(float, float) -> bool;
     callback annotation-undo-requested();
     callback annotation-redo-requested();
     callback annotation-reset-requested();
@@ -185,6 +186,7 @@ export component CaptureWindow inherits Window {
         annotation-pointer-event(phase, x, y, preserve-aspect, centered) => {
             root.annotation-pointer-event(phase, x, y, preserve-aspect, centered);
         }
+        annotation-hit-test(x, y) => { return root.annotation-hit-test(x, y); }
         annotation-undo-requested => { root.annotation-undo-requested(); }
         annotation-redo-requested => { root.annotation-redo-requested(); }
         annotation-reset-requested => { root.annotation-reset-requested(); }
