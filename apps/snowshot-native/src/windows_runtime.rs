@@ -40,12 +40,13 @@ use crate::resize_geometry::project_size_to_aspect;
 use crate::windows_pin::{
     PinCompositor, PinFrame, destroy_pin_window, hide_pin_window, is_pin_window, show_pin_window,
 };
+use crate::windows_scroll::{ScrollCaptureOutcome, ScrollCaptureRequest, run_scroll_capture};
 use crate::{AppTray, AppWindow, CaptureWindow};
 
 const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
 const ESCAPE_POLL_INTERVAL: Duration = Duration::from_millis(16);
-const TOOLBAR_WIDTH: f32 = 840.0;
+const TOOLBAR_WIDTH: f32 = 884.0;
 const TOOLBAR_MAX_STACK_HEIGHT: f32 = 198.0;
 const TOOLBAR_VIEWPORT_MARGIN: f32 = 8.0;
 #[cfg(test)]
@@ -722,6 +723,104 @@ fn bind_capture_callbacks(
             ),
             Err(error) => set_status(&app_weak, &error),
         }
+    });
+
+    let app_weak = app.as_weak();
+    let scroll_capture_window = capture_window.clone();
+    let scroll_session = Arc::clone(&session);
+    capture.on_selection_scroll_requested(move |left, top, right, bottom| {
+        let request = (|| {
+            let region = selection_region(&scroll_session, left, top, right, bottom)?;
+            let has_annotations = scroll_session
+                .annotation
+                .lock()
+                .map_err(|_| "标注文档状态不可用。".to_string())?
+                .as_ref()
+                .is_some_and(|annotation| annotation.document.has_annotations());
+            if has_annotations {
+                return Err("长截图需要原始画面，请先清空当前标注和 OCR 结果。".to_string());
+            }
+            let frame = scroll_session
+                .frame
+                .lock()
+                .map_err(|_| "截图会话状态不可用。".to_string())?;
+            let frozen = frame
+                .as_ref()
+                .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+            let initial_frame =
+                extract_frozen_region(frozen, region).map_err(|error| error.to_string())?;
+            Ok(ScrollCaptureRequest {
+                monitor_origin_x: frozen.origin_x(),
+                monitor_origin_y: frozen.origin_y(),
+                monitor_width: frozen.width(),
+                monitor_height: frozen.height(),
+                region,
+                initial_frame,
+            })
+        })();
+
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                set_status(&app_weak, &error);
+                return;
+            }
+        };
+        set_status(
+            &app_weak,
+            "长截图已启动：在原页面滚动，按 Enter 完成，按 Esc 取消。",
+        );
+
+        let retire_app = app_weak.clone();
+        let retire_session = Arc::clone(&scroll_session);
+        suspend_region_capture(
+            scroll_capture_window.clone(),
+            Arc::clone(&scroll_session),
+            move || {
+                let worker_app = retire_app.clone();
+                let worker_session = Arc::clone(&retire_session);
+                let spawn_result = thread::Builder::new()
+                    .name("snowshot-scroll-capture".to_string())
+                    .spawn(move || {
+                        let status = match run_scroll_capture(request) {
+                            Ok(ScrollCaptureOutcome::Completed(frame)) => {
+                                match copy_region_frame_to_clipboard(&frame) {
+                                    Ok(summary) => format!(
+                                        "长截图已完成并复制到剪贴板：{}×{}。",
+                                        summary.width(),
+                                        summary.height()
+                                    ),
+                                    Err(error) => error.to_string(),
+                                }
+                            }
+                            Ok(ScrollCaptureOutcome::Cancelled) => "已取消长截图。".to_string(),
+                            Err(error) => format!("长截图失败：{error}"),
+                        };
+                        let fallback_session = Arc::clone(&worker_session);
+                        let delivery_session = Arc::clone(&worker_session);
+                        if worker_app
+                            .upgrade_in_event_loop(move |app| {
+                                clear_capture_data(&delivery_session);
+                                delivery_session.finishing.store(false, Ordering::Release);
+                                delivery_session.busy.store(false, Ordering::Release);
+                                app.set_runtime_status(status.into());
+                            })
+                            .is_err()
+                        {
+                            clear_capture_data(&fallback_session);
+                            fallback_session.finishing.store(false, Ordering::Release);
+                            fallback_session.busy.store(false, Ordering::Release);
+                        }
+                    });
+
+                if let Err(error) = spawn_result {
+                    clear_capture_data(&retire_session);
+                    retire_session.finishing.store(false, Ordering::Release);
+                    retire_session.busy.store(false, Ordering::Release);
+                    set_status(&retire_app, &format!("无法启动长截图任务：{error}"));
+                }
+            },
+        );
     });
 
     let app_weak = app.as_weak();

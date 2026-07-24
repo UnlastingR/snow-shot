@@ -285,6 +285,7 @@ export component CaptureToolbar inherits Rectangle {
     callback save-clicked();
     callback pin-clicked();
     callback ocr-clicked();
+    callback scroll-clicked();
     callback cancel-clicked();
     callback tool-selected(int);
     callback undo-clicked();
@@ -298,7 +299,7 @@ export component CaptureToolbar inherits Rectangle {
 
     public function dismiss-menu() { root.open-group = 0; }
 
-    width: 840px;
+    width: 884px;
     height: 48px;
     border-radius: 10px;
     border-width: 1px;
@@ -375,6 +376,7 @@ export component CaptureToolbar inherits Rectangle {
         ToolButton { label: "取色"; icon-kind: 7; selected: root.active-tool == 7; clicked => { root.open-group = 0; root.tool-selected(7); } }
         Divider {}
         ToolButton { width: 42px; label: root.ocr-busy ? "OCR…" : "OCR"; enabled: !root.ocr-busy; clicked => { root.open-group = 0; root.ocr-clicked(); } }
+        ToolButton { width: 42px; label: "长图"; clicked => { root.open-group = 0; root.scroll-clicked(); } }
         HistoryButton { label: "撤销"; enabled: root.can-undo; clicked => { root.undo-clicked(); } }
         HistoryButton { label: "重做"; enabled: root.can-redo; reverse: true; clicked => { root.redo-clicked(); } }
         ToolButton {

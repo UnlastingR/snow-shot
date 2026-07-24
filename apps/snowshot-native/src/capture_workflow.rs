@@ -164,6 +164,23 @@ pub fn extract_frozen_region(
     })
 }
 
+pub fn capture_live_region(
+    origin_x: i32,
+    origin_y: i32,
+    region: PixelRect,
+) -> Result<FrozenRegionFrame, CaptureWorkflowError> {
+    let rgba = snow_shot_capture::windows::capture_monitor_region_at_origin(
+        origin_x,
+        origin_y,
+        region,
+        PixelFormat::Rgba8,
+    )
+    .map_err(CaptureWorkflowError::Capture)?
+    .to_rgba8();
+
+    FrozenRegionFrame::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
+}
+
 pub fn save_region_frame_to_path(
     frame: &FrozenRegionFrame,
     path: &Path,

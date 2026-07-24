@@ -100,6 +100,38 @@ pub fn capture_monitor_under_cursor_with_position(
     })
 }
 
+pub fn capture_monitor_region_at_origin(
+    origin_x: i32,
+    origin_y: i32,
+    region: PixelRect,
+    pixel_format: PixelFormat,
+) -> Result<DynamicImage, CaptureError> {
+    let sample_x = origin_x
+        .saturating_add(i32::try_from(region.x()).unwrap_or(i32::MAX))
+        .saturating_add(i32::try_from(region.width() / 2).unwrap_or(i32::MAX));
+    let sample_y = origin_y
+        .saturating_add(i32::try_from(region.y()).unwrap_or(i32::MAX))
+        .saturating_add(i32::try_from(region.height() / 2).unwrap_or(i32::MAX));
+    let monitor = xcap::Monitor::from_point(sample_x, sample_y).map_err(|error| {
+        CaptureError::Backend(format!(
+            "find monitor for region at ({sample_x}, {sample_y}): {error}"
+        ))
+    })?;
+    let actual_x = monitor
+        .x()
+        .map_err(|error| CaptureError::Backend(format!("read monitor x position: {error}")))?;
+    let actual_y = monitor
+        .y()
+        .map_err(|error| CaptureError::Backend(format!("read monitor y position: {error}")))?;
+    if actual_x != origin_x || actual_y != origin_y {
+        return Err(CaptureError::Backend(format!(
+            "monitor origin changed from ({origin_x}, {origin_y}) to ({actual_x}, {actual_y})"
+        )));
+    }
+
+    capture_monitor(&monitor, Some(region), pixel_format)
+}
+
 pub fn capture_window(
     window: &xcap::Window,
     pixel_format: PixelFormat,

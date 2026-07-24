@@ -15,6 +15,8 @@ mod resize_geometry;
 mod windows_pin;
 #[cfg(target_os = "windows")]
 mod windows_runtime;
+#[cfg(target_os = "windows")]
+mod windows_scroll;
 
 slint::include_modules!();
 

@@ -60,6 +60,7 @@ export component CaptureOverlayPage inherits Rectangle {
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
     callback selection-ocr-requested(float, float, float, float);
+    callback selection-scroll-requested(float, float, float, float);
     callback ocr-copy-requested();
     callback annotation-tool-requested(int, float, float, float, float);
     callback annotation-pointer-event(int, float, float, bool, bool);
@@ -263,6 +264,16 @@ export component CaptureOverlayPage inherits Rectangle {
     function ocr-current-selection() {
         if (root.has-selection && root.width > 0px && root.height > 0px) {
             root.selection-ocr-requested(
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        }
+    }
+    function scroll-current-selection() {
+        if (root.has-selection && root.width > 0px && root.height > 0px) {
+            root.selection-scroll-requested(
                 root.selection-left / root.width,
                 root.selection-top / root.height,
                 root.selection-right / root.width,
@@ -1038,6 +1049,7 @@ export component CaptureOverlayPage inherits Rectangle {
         save-clicked => { root.save-current-selection(); }
         pin-clicked => { root.pin-current-selection(); }
         ocr-clicked => { root.ocr-current-selection(); }
+        scroll-clicked => { root.scroll-current-selection(); }
         cancel-clicked => { root.cancelled(); }
         active-tool: root.annotation-tool;
         can-undo: root.annotation-can-undo;

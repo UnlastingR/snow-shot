@@ -55,6 +55,7 @@ export component CaptureWindow inherits Window {
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
     callback selection-ocr-requested(float, float, float, float);
+    callback selection-scroll-requested(float, float, float, float);
     callback ocr-copy-requested();
     callback annotation-tool-requested(int, float, float, float, float);
     callback annotation-pointer-event(int, float, float, bool, bool);
@@ -184,6 +185,8 @@ export component CaptureWindow inherits Window {
         }
         selection-ocr-requested(left, top, right, bottom) => {
             root.selection-ocr-requested(left, top, right, bottom);
+        }        selection-scroll-requested(left, top, right, bottom) => {
+            root.selection-scroll-requested(left, top, right, bottom);
         }
         ocr-copy-requested => {
             root.ocr-copy-requested();
