@@ -6,6 +6,10 @@
 #[cfg(target_os = "windows")]
 mod capture_workflow;
 #[cfg(target_os = "windows")]
+mod native_settings;
+#[cfg(target_os = "windows")]
+mod ocr_workflow;
+#[cfg(target_os = "windows")]
 mod resize_geometry;
 #[cfg(target_os = "windows")]
 mod windows_pin;

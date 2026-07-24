@@ -3,9 +3,76 @@ import { CaptureOverlayPage } from "pages/capture-overlay-page.slint";
 export component CaptureWindow inherits Window {
     in-out property <image> frozen-frame;
     in-out property <bool> presentation-active: false;
+    in-out property <image> annotation-frame;
+    in-out property <bool> annotation-visible: false;
+    in-out property <int> annotation-tool: 0;
+    in-out property <bool> annotation-can-undo: false;
+    in-out property <bool> annotation-can-redo: false;
+    in-out property <color> annotation-color: #e84444;
+    in-out property <string> annotation-color-label: "#E84444";
+    in-out property <bool> ocr-visible: false;
+    in-out property <bool> ocr-busy: false;
+    in-out property <string> ocr-status: "";
+    in-out property <string> ocr-text: "";
+    in-out property <string> ocr-selected-text: "";
+    in-out property <bool> ocr-manual-color: false;
+    in-out property <color> style-stroke-color: #e84444;
+    in-out property <color> style-fill-color: #e844441c;
+    in-out property <color> style-text-color: #e84444;
+    in-out property <string> style-stroke-hex: "#E84444";
+    in-out property <string> style-fill-hex: "#E844441C";
+    in-out property <string> style-text-hex: "#E84444";
+    in-out property <float> style-stroke-width: 6;
+    in-out property <float> style-opacity: 100;
+    in-out property <float> style-brush-size: 22;
+    in-out property <float> style-effect-strength: 55;
+    in-out property <float> style-font-size: 24;
+    in-out property <bool> style-bold: false;
+    in-out property <int> style-text-alignment: 0;
+    in-out property <float> style-serial-number: 1;
+    in-out property <bool> selected-is-serial: false;
+    in-out property <int> selected-annotation-tool: 0;
+    in-out property <bool> ocr-available: false;
+    in-out property <int> active-color-slot: 0;
+    in-out property <string> selected-text: "";
+    in-out property <bool> has-selected-element: false;
+    in-out property <image> magnifier-frame;
+    in-out property <bool> magnifier-visible: false;
+    in-out property <string> magnifier-label: "";
+    in-out property <int> color-format: 0;
+    in-out property <int> last-shape: 8;
+    in-out property <int> last-line: 3;
+    in-out property <int> last-pen: 1;
+    in-out property <int> last-privacy: 5;
+    in-out property <float> toolbar-position-x: -1;
+    in-out property <float> toolbar-position-y: -1;
+    in-out property <float> property-position-x: -1;
+    in-out property <float> property-position-y: -1;
+    in-out property <bool> text-input-active: false;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback selection-ocr-requested(float, float, float, float);
+    callback ocr-copy-requested();
+    callback annotation-tool-requested(int, float, float, float, float);
+    callback annotation-pointer-event(int, float, float, bool, bool);
+    callback annotation-undo-requested();
+    callback annotation-redo-requested();
+    callback annotation-reset-requested();
+    callback annotation-color-requested(int, string);
+    callback annotation-color-alpha-requested(int, float);
+    callback annotation-style-value-requested(int, float);
+    callback annotation-text-requested(string);
+    callback annotation-layer-requested(int);
+    callback annotation-delete-requested();
+    callback ocr-visibility-requested(bool);
+    callback ocr-auto-color-requested();
+    callback context-copy-requested(bool, float, float, float, float);
+    callback cursor-sample-requested(float, float, float, float);
+    callback color-format-cycle-requested();
+    callback color-copy-requested();
+    callback cursor-nudge-requested(int, int);
+    callback floating-position-changed(int, float, float);
     callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
@@ -44,9 +111,59 @@ export component CaptureWindow inherits Window {
         overlay.clear-window-preview();
     }
 
+    public function handle-native-escape() {
+        overlay.handle-native-escape();
+    }
+
     overlay := CaptureOverlayPage {
         frozen-frame: root.frozen-frame;
         presentation-active: root.presentation-active;
+        annotation-frame: root.annotation-frame;
+        annotation-visible: root.annotation-visible;
+        annotation-tool: root.annotation-tool;
+        annotation-can-undo: root.annotation-can-undo;
+        annotation-can-redo: root.annotation-can-redo;
+        annotation-color: root.annotation-color;
+        annotation-color-label: root.annotation-color-label;
+        ocr-visible <=> root.ocr-visible;
+        ocr-busy <=> root.ocr-busy;
+        ocr-status <=> root.ocr-status;
+        ocr-text <=> root.ocr-text;
+        ocr-selected-text: root.ocr-selected-text;
+        ocr-manual-color: root.ocr-manual-color;
+        style-stroke-color: root.style-stroke-color;
+        style-fill-color: root.style-fill-color;
+        style-text-color: root.style-text-color;
+        style-stroke-hex <=> root.style-stroke-hex;
+        style-fill-hex <=> root.style-fill-hex;
+        style-text-hex <=> root.style-text-hex;
+        style-stroke-width: root.style-stroke-width;
+        style-opacity: root.style-opacity;
+        style-brush-size: root.style-brush-size;
+        style-effect-strength: root.style-effect-strength;
+        style-font-size: root.style-font-size;
+        style-bold: root.style-bold;
+        style-text-alignment: root.style-text-alignment;
+        style-serial-number: root.style-serial-number;
+        selected-is-serial: root.selected-is-serial;
+        selected-annotation-tool: root.selected-annotation-tool;
+        ocr-available: root.ocr-available;
+        active-color-slot <=> root.active-color-slot;
+        selected-text <=> root.selected-text;
+        has-selected-element: root.has-selected-element;
+        magnifier-frame: root.magnifier-frame;
+        magnifier-visible: root.magnifier-visible;
+        magnifier-label: root.magnifier-label;
+        color-format: root.color-format;
+        last-shape <=> root.last-shape;
+        last-line <=> root.last-line;
+        last-pen <=> root.last-pen;
+        last-privacy <=> root.last-privacy;
+        toolbar-position-x <=> root.toolbar-position-x;
+        toolbar-position-y <=> root.toolbar-position-y;
+        property-position-x <=> root.property-position-x;
+        property-position-y <=> root.property-position-y;
+        text-input-active <=> root.text-input-active;
         selection-confirmed(left, top, right, bottom) => {
             root.selection-confirmed(left, top, right, bottom);
         }
@@ -55,6 +172,47 @@ export component CaptureWindow inherits Window {
         }
         selection-pin-requested(left, top, right, bottom) => {
             root.selection-pin-requested(left, top, right, bottom);
+        }
+        selection-ocr-requested(left, top, right, bottom) => {
+            root.selection-ocr-requested(left, top, right, bottom);
+        }
+        ocr-copy-requested => {
+            root.ocr-copy-requested();
+        }
+        annotation-tool-requested(tool, left, top, right, bottom) => {
+            root.annotation-tool-requested(tool, left, top, right, bottom);
+        }
+        annotation-pointer-event(phase, x, y, preserve-aspect, centered) => {
+            root.annotation-pointer-event(phase, x, y, preserve-aspect, centered);
+        }
+        annotation-undo-requested => { root.annotation-undo-requested(); }
+        annotation-redo-requested => { root.annotation-redo-requested(); }
+        annotation-reset-requested => { root.annotation-reset-requested(); }
+        annotation-color-requested(slot, value) => {
+            root.annotation-color-requested(slot, value);
+        }
+        annotation-color-alpha-requested(slot, value) => {
+            root.annotation-color-alpha-requested(slot, value);
+        }
+        annotation-style-value-requested(field, value) => {
+            root.annotation-style-value-requested(field, value);
+        }
+        annotation-text-requested(text) => { root.annotation-text-requested(text); }
+        annotation-layer-requested(command) => { root.annotation-layer-requested(command); }
+        annotation-delete-requested => { root.annotation-delete-requested(); }
+        ocr-visibility-requested(visible) => { root.ocr-visibility-requested(visible); }
+        ocr-auto-color-requested => { root.ocr-auto-color-requested(); }
+        context-copy-requested(force-image, left, top, right, bottom) => {
+            root.context-copy-requested(force-image, left, top, right, bottom);
+        }
+        cursor-sample-requested(x, y, canvas-width, canvas-height) => {
+            root.cursor-sample-requested(x, y, canvas-width, canvas-height);
+        }
+        color-format-cycle-requested => { root.color-format-cycle-requested(); }
+        color-copy-requested => { root.color-copy-requested(); }
+        cursor-nudge-requested(dx, dy) => { root.cursor-nudge-requested(dx, dy); }
+        floating-position-changed(panel, x, y) => {
+            root.floating-position-changed(panel, x, y);
         }
         window-target-requested(x, y, width, height) => {
             root.window-target-requested(x, y, width, height);

@@ -1,14 +1,83 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
 import { CaptureToolbar } from "../components/capture-toolbar.slint";
+import { AnnotationPropertyPanel } from "../components/annotation-property-panel.slint";
+import { ColorMagnifier } from "../components/color-magnifier.slint";
 import { ResizeHandle } from "../components/resize-handle.slint";
 import { SelectionEdgeHandle } from "../components/selection-edge-handle.slint";
 
 export component CaptureOverlayPage inherits Rectangle {
     in property <image> frozen-frame;
     in property <bool> presentation-active;
+    in property <image> annotation-frame;
+    in property <bool> annotation-visible;
+    in property <int> annotation-tool;
+    in property <bool> annotation-can-undo;
+    in property <bool> annotation-can-redo;
+    in property <color> annotation-color;
+    in property <string> annotation-color-label;
+    in-out property <bool> ocr-visible;
+    in-out property <bool> ocr-busy;
+    in-out property <string> ocr-status;
+    in-out property <string> ocr-text;
+    in property <string> ocr-selected-text;
+    in property <bool> ocr-manual-color;
+    in property <color> style-stroke-color;
+    in property <color> style-fill-color;
+    in property <color> style-text-color;
+    in-out property <string> style-stroke-hex;
+    in-out property <string> style-fill-hex;
+    in-out property <string> style-text-hex;
+    in property <float> style-stroke-width;
+    in property <float> style-opacity;
+    in property <float> style-brush-size;
+    in property <float> style-effect-strength;
+    in property <float> style-font-size;
+    in property <bool> style-bold;
+    in property <int> style-text-alignment;
+    in property <float> style-serial-number;
+    in property <bool> selected-is-serial;
+    in property <int> selected-annotation-tool;
+    in property <bool> ocr-available;
+    in-out property <int> active-color-slot: 0;
+    in-out property <string> selected-text;
+    in property <bool> has-selected-element;
+    in property <image> magnifier-frame;
+    in property <bool> magnifier-visible;
+    in property <string> magnifier-label;
+    in property <int> color-format;
+    in-out property <int> last-shape;
+    in-out property <int> last-line;
+    in-out property <int> last-pen;
+    in-out property <int> last-privacy;
+    in-out property <float> toolbar-position-x: -1;
+    in-out property <float> toolbar-position-y: -1;
+    in-out property <float> property-position-x: -1;
+    in-out property <float> property-position-y: -1;
+    in-out property <bool> text-input-active: false;
     callback selection-confirmed(float, float, float, float);
     callback selection-save-requested(float, float, float, float);
     callback selection-pin-requested(float, float, float, float);
+    callback selection-ocr-requested(float, float, float, float);
+    callback ocr-copy-requested();
+    callback annotation-tool-requested(int, float, float, float, float);
+    callback annotation-pointer-event(int, float, float, bool, bool);
+    callback annotation-undo-requested();
+    callback annotation-redo-requested();
+    callback annotation-reset-requested();
+    callback annotation-color-requested(int, string);
+    callback annotation-color-alpha-requested(int, float);
+    callback annotation-style-value-requested(int, float);
+    callback annotation-text-requested(string);
+    callback annotation-layer-requested(int);
+    callback annotation-delete-requested();
+    callback ocr-visibility-requested(bool);
+    callback ocr-auto-color-requested();
+    callback context-copy-requested(bool, float, float, float, float);
+    callback cursor-sample-requested(float, float, float, float);
+    callback color-format-cycle-requested();
+    callback color-copy-requested();
+    callback cursor-nudge-requested(int, int);
+    callback floating-position-changed(int, float, float);
     callback window-target-requested(float, float, float, float);
     callback selection-transform-requested(
         int,
@@ -24,6 +93,8 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> anchor-y: 0px;
     private property <length> cursor-x: 0px;
     private property <length> cursor-y: 0px;
+    private property <length> sample-x: 0px;
+    private property <length> sample-y: 0px;
     private property <length> pending-cursor-x: 0px;
     private property <length> pending-cursor-y: 0px;
     private property <bool> cursor-update-pending: false;
@@ -40,6 +111,28 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <bool> window-click-pending: false;
     private property <bool> selecting: false;
     private property <bool> has-selection: false;
+    private property <bool> selection-animation-enabled: false;
+    private property <bool> selection-animation-pending: false;
+    private property <float> annotation-pending-x: 0;
+    private property <float> annotation-pending-y: 0;
+    private property <bool> annotation-pending-shift: false;
+    private property <bool> annotation-pending-control: false;
+    private property <bool> annotation-pointer-down: false;
+    private property <bool> annotation-update-pending: false;
+    private property <length> toolbar-x: root.toolbar-position-x * 1px;
+    private property <length> toolbar-y: root.toolbar-position-y * 1px;
+    private property <bool> toolbar-dragging: false;
+    private property <float> toolbar-drag-start-x: 0;
+    private property <float> toolbar-drag-start-y: 0;
+    private property <length> toolbar-item-start-x: 0px;
+    private property <length> toolbar-item-start-y: 0px;
+    private property <length> property-x: root.property-position-x * 1px;
+    private property <length> property-y: root.property-position-y * 1px;
+    private property <bool> property-dragging: false;
+    private property <float> property-drag-start-x: 0;
+    private property <float> property-drag-start-y: 0;
+    private property <length> property-item-start-x: 0px;
+    private property <length> property-item-start-y: 0px;
     private property <length> transform-start-left: 0px;
     private property <length> transform-start-top: 0px;
     private property <length> transform-start-right: 0px;
@@ -52,6 +145,24 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> selection-bottom: max(root.anchor-y, root.cursor-y);
     private property <length> selection-width: root.selection-right - root.selection-left;
     private property <length> selection-height: root.selection-bottom - root.selection-top;
+    private property <length> magnifier-x-primary:
+        root.sample-x + 202px <= root.width ? root.sample-x + 18px : root.sample-x - 202px;
+    private property <length> magnifier-y-primary:
+        root.sample-y + 248px <= root.height ? root.sample-y + 18px : root.sample-y - 248px;
+    private property <length> magnifier-x-alternate:
+        root.magnifier-x-primary > root.sample-x ? root.sample-x - 202px : root.sample-x + 18px;
+    private property <length> magnifier-y-alternate:
+        root.magnifier-y-primary > root.sample-y ? root.sample-y - 248px : root.sample-y + 18px;
+    private property <bool> magnifier-primary-collides:
+        (root.magnifier-x-primary < toolbar.x + toolbar.width
+            && root.magnifier-x-primary + 184px > toolbar.x
+            && root.magnifier-y-primary < toolbar.y + toolbar.height
+            && root.magnifier-y-primary + 230px > toolbar.y)
+        || (property-panel.visible
+            && root.magnifier-x-primary < property-panel.x + property-panel.width
+            && root.magnifier-x-primary + 184px > property-panel.x
+            && root.magnifier-y-primary < property-panel.y + property-panel.height
+            && root.magnifier-y-primary + 230px > property-panel.y);
     private property <bool> selection-visible: root.selecting || root.has-selection;
     private property <bool> highlight-visible:
         root.selection-visible || root.window-preview-visible;
@@ -75,9 +186,28 @@ export component CaptureOverlayPage inherits Rectangle {
         easing: cubic-bezier(0.45, 0, 0.55, 1);
     }
 
+    animate anchor-x, anchor-y, cursor-x, cursor-y {
+        duration: root.selection-animation-enabled ? 105ms : 0ms;
+        easing: cubic-bezier(0.45, 0, 0.55, 1);
+    }
+
     function update-cursor(x: length, y: length) {
         root.cursor-x = max(0px, min(root.width, x));
         root.cursor-y = max(0px, min(root.height, y));
+        root.update-sample(x, y);
+    }
+
+    function update-sample(x: length, y: length) {
+        root.sample-x = max(0px, min(root.width, x));
+        root.sample-y = max(0px, min(root.height, y));
+        if (root.presentation-active && root.width > 0px && root.height > 0px) {
+            root.cursor-sample-requested(
+                root.sample-x / 1px,
+                root.sample-y / 1px,
+                root.width / 1px,
+                root.height / 1px,
+            );
+        }
     }
 
     function confirm-current-selection() {
@@ -113,7 +243,34 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    function ocr-current-selection() {
+        if (root.has-selection && root.width > 0px && root.height > 0px) {
+            root.selection-ocr-requested(
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        }
+    }
+
+    function select-full-canvas() {
+        root.annotation-reset-requested();
+        root.ocr-visible = false;
+        root.window-preview-visible = false;
+        root.selecting = false;
+        root.has-selection = true;
+        root.selection-animation-enabled = true;
+        root.selection-animation-pending = true;
+        root.anchor-x = 0px;
+        root.anchor-y = 0px;
+        root.cursor-x = root.width;
+        root.cursor-y = root.height;
+    }
+
     function begin-transform(pointer-x: length, pointer-y: length) {
+        root.selection-animation-enabled = false;
+        root.selection-animation-pending = false;
         root.transform-start-left = root.selection-left;
         root.transform-start-top = root.selection-top;
         root.transform-start-right = root.selection-right;
@@ -152,6 +309,8 @@ export component CaptureOverlayPage inherits Rectangle {
         root.anchor-y = 0px;
         root.cursor-x = 0px;
         root.cursor-y = 0px;
+        root.sample-x = 0px;
+        root.sample-y = 0px;
         root.pending-cursor-x = 0px;
         root.pending-cursor-y = 0px;
         root.cursor-update-pending = false;
@@ -162,6 +321,12 @@ export component CaptureOverlayPage inherits Rectangle {
         root.window-click-pending = false;
         root.selecting = false;
         root.has-selection = false;
+        root.selection-animation-enabled = false;
+        root.selection-animation-pending = false;
+        root.ocr-visible = false;
+        root.ocr-busy = false;
+        root.ocr-status = "";
+        root.ocr-text = "";
         keyboard-focus.focus();
     }
 
@@ -170,6 +335,8 @@ export component CaptureOverlayPage inherits Rectangle {
     }
 
     public function apply-selection(left: float, top: float, right: float, bottom: float) {
+        root.selection-animation-enabled = false;
+        root.selection-animation-pending = false;
         root.anchor-x = left * 1px;
         root.anchor-y = top * 1px;
         root.cursor-x = right * 1px;
@@ -204,6 +371,26 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    public function handle-native-escape() {
+        if (toolbar.menu-open) {
+            toolbar.dismiss-menu();
+        } else if (root.annotation-pointer-down) {
+            root.annotation-pointer-down = false;
+            root.annotation-update-pending = false;
+            root.annotation-pointer-event(3, 0, 0, false, false);
+        } else if (root.annotation-tool != 0) {
+            root.annotation-tool-requested(
+                root.annotation-tool == 7 ? -1 : 0,
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+        } else {
+            root.cancelled();
+        }
+    }
+
     Image {
         width: root.width;
         height: root.height;
@@ -216,7 +403,16 @@ export component CaptureOverlayPage inherits Rectangle {
         mouse-cursor: crosshair;
 
         pointer-event(event) => {
+            if (event.kind == PointerEventKind.move
+                    || event.kind == PointerEventKind.down) {
+                root.update-sample(self.mouse-x, self.mouse-y);
+            }
             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                if (root.annotation-visible) {
+                    root.annotation-reset-requested();
+                }
+                root.selection-animation-enabled = false;
+                root.selection-animation-pending = false;
                 root.anchor-x = max(0px, min(root.width, self.mouse-x));
                 root.anchor-y = max(0px, min(root.height, self.mouse-y));
                 root.cursor-x = root.anchor-x;
@@ -320,6 +516,15 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
+    Timer {
+        interval: 110ms;
+        running: root.selection-animation-pending;
+        triggered => {
+            root.selection-animation-enabled = false;
+            root.selection-animation-pending = false;
+        }
+    }
+
     if root.presentation-active && !root.highlight-visible : Rectangle {
         background: #0000006e;
     }
@@ -366,7 +571,27 @@ export component CaptureOverlayPage inherits Rectangle {
         border-color: SnowTheme.focus-ring;
     }
 
-    if root.presentation-active && root.has-selection : TouchArea {
+    if root.presentation-active && root.has-selection && root.annotation-visible : Image {
+        x: root.selection-left;
+        y: root.selection-top;
+        width: root.selection-width;
+        height: root.selection-height;
+        source: root.annotation-frame;
+        image-fit: fill;
+    }
+
+    if root.presentation-active && root.has-selection && root.annotation-visible : Rectangle {
+        x: root.selection-left;
+        y: root.selection-top;
+        width: root.selection-width;
+        height: root.selection-height;
+        background: transparent;
+        border-width: 2px;
+        border-color: SnowTheme.focus-ring;
+    }
+
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : TouchArea {
         x: root.selection-left;
         y: root.selection-top;
         width: root.selection-width;
@@ -390,7 +615,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nwse-resize;
@@ -408,7 +634,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-top - self.height / 2;
         cursor: nesw-resize;
@@ -426,7 +653,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : ResizeHandle {
         x: root.selection-left - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nesw-resize;
@@ -444,7 +672,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : ResizeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : ResizeHandle {
         x: root.selection-right - self.width / 2;
         y: root.selection-bottom - self.height / 2;
         cursor: nwse-resize;
@@ -462,7 +691,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : SelectionEdgeHandle {
         x: root.selection-left + 6px;
         y: root.selection-top - 6px;
         width: max(0px, root.selection-width - 12px);
@@ -482,7 +712,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : SelectionEdgeHandle {
         x: root.selection-right - 6px;
         y: root.selection-top + 6px;
         width: 12px;
@@ -502,7 +733,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : SelectionEdgeHandle {
         x: root.selection-left + 6px;
         y: root.selection-bottom - 6px;
         width: max(0px, root.selection-width - 12px);
@@ -522,7 +754,8 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : SelectionEdgeHandle {
+    if root.presentation-active && root.has-selection
+            && !root.annotation-visible : SelectionEdgeHandle {
         x: root.selection-left - 6px;
         y: root.selection-top + 6px;
         width: 12px;
@@ -552,7 +785,13 @@ export component CaptureOverlayPage inherits Rectangle {
 
         Text {
             text: root.has-selection
-                ? "框内拖动移动 · 四边/四角缩放 · Shift 等比 · Ctrl 中心缩放"
+                ? root.annotation-visible
+                    ? root.annotation-tool > 0
+                        ? "在选区内拖动标注 · Ctrl+Z 撤销 · Ctrl+Y 重做"
+                        : root.ocr-selected-text != ""
+                            ? "已选 OCR 文字块 · Ctrl+C 复制文字 · Ctrl+Shift+C 复制图片"
+                            : "单击选择标注或 OCR 文字块 · Ctrl+C 复制图片"
+                    : "框内拖动移动 · 四边/四角缩放 · Shift 等比 · Ctrl 中心缩放"
                 : root.window-preview-visible
                     ? "单击选择窗口 · 拖动切换为自由框选 · Esc 取消"
                     : "移动鼠标智能选窗 · 拖动自由框选 · Esc 取消";
@@ -563,29 +802,390 @@ export component CaptureOverlayPage inherits Rectangle {
         }
     }
 
-    if root.presentation-active && root.has-selection : CaptureToolbar {
-        x: min(
-            root.width - self.width - SnowTheme.space-3,
-            max(SnowTheme.space-3, root.selection-right - self.width),
-        );
-        y: root.selection-bottom + self.height + SnowTheme.space-3 < root.height
-            ? root.selection-bottom + SnowTheme.space-3
-            : max(SnowTheme.space-3, root.selection-top - self.height - SnowTheme.space-3);
+    if root.presentation-active && root.has-selection
+            && root.annotation-visible : TouchArea {
+        x: root.selection-left;
+        y: root.selection-top;
+        width: root.selection-width;
+        height: root.selection-height;
+        mouse-cursor: crosshair;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.move
+                    || event.kind == PointerEventKind.down) {
+                root.update-sample(
+                    self.x + self.mouse-x,
+                    self.y + self.mouse-y,
+                );
+            }
+            if (event.kind == PointerEventKind.down
+                    && event.button == PointerEventButton.left) {
+                root.annotation-pointer-down = true;
+                root.annotation-update-pending = false;
+                root.annotation-pointer-event(
+                    0,
+                    self.mouse-x / max(1px, self.width),
+                    self.mouse-y / max(1px, self.height),
+                    event.modifiers.shift,
+                    event.modifiers.control,
+                );
+                keyboard-focus.focus();
+            } else if (event.kind == PointerEventKind.move
+                    && root.annotation-pointer-down) {
+                root.annotation-pending-x =
+                    self.mouse-x / max(1px, self.width);
+                root.annotation-pending-y =
+                    self.mouse-y / max(1px, self.height);
+                root.annotation-pending-shift = event.modifiers.shift;
+                root.annotation-pending-control = event.modifiers.control;
+                root.annotation-update-pending = true;
+            } else if (event.kind == PointerEventKind.up
+                    && root.annotation-pointer-down) {
+                root.annotation-pointer-down = false;
+                root.annotation-update-pending = false;
+                root.annotation-pointer-event(
+                    2,
+                    self.mouse-x / max(1px, self.width),
+                    self.mouse-y / max(1px, self.height),
+                    event.modifiers.shift,
+                    event.modifiers.control,
+                );
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.annotation-pointer-down = false;
+                root.annotation-update-pending = false;
+                root.annotation-pointer-event(
+                    3,
+                    self.mouse-x / max(1px, self.width),
+                    self.mouse-y / max(1px, self.height),
+                    false,
+                    false,
+                );
+            }
+        }
+    }
+
+    Timer {
+        interval: 8ms;
+        running: root.presentation-active
+            && root.annotation-pointer-down
+            && root.annotation-visible;
+        triggered => {
+            if (root.annotation-update-pending) {
+                root.annotation-pointer-event(
+                    1,
+                    root.annotation-pending-x,
+                    root.annotation-pending-y,
+                    root.annotation-pending-shift,
+                    root.annotation-pending-control,
+                );
+                root.annotation-update-pending = false;
+            }
+        }
+    }
+
+    toolbar := CaptureToolbar {
+        visible: root.presentation-active && root.has-selection;
+        x: root.toolbar-x >= 0px
+            ? max(
+                SnowTheme.space-2,
+                min(root.width - self.width - SnowTheme.space-2, root.toolbar-x),
+            )
+            : max(
+                SnowTheme.space-3,
+                min(
+                    root.width - self.width - SnowTheme.space-3,
+                    root.selection-right - self.width,
+                ),
+            );
+        y: root.toolbar-y >= 0px
+            ? max(
+                SnowTheme.space-2,
+                min(root.height - self.height - SnowTheme.space-2, root.toolbar-y),
+            )
+            : root.selection-bottom + self.height + SnowTheme.space-3 < root.height
+                ? root.selection-bottom + SnowTheme.space-3
+                : max(SnowTheme.space-3, root.selection-top - self.height - SnowTheme.space-3);
         confirm-clicked => { root.confirm-current-selection(); }
         save-clicked => { root.save-current-selection(); }
         pin-clicked => { root.pin-current-selection(); }
+        ocr-clicked => { root.ocr-current-selection(); }
         cancel-clicked => { root.cancelled(); }
+        active-tool: root.annotation-tool;
+        can-undo: root.annotation-can-undo;
+        can-redo: root.annotation-can-redo;
+        active-color: root.annotation-color;
+        color-label: root.annotation-color-label;
+        ocr-busy: root.ocr-busy;
+        ocr-status: root.ocr-status;
+        last-shape <=> root.last-shape;
+        last-line <=> root.last-line;
+        last-pen <=> root.last-pen;
+        last-privacy <=> root.last-privacy;
+        tool-selected(tool) => {
+            root.annotation-tool-requested(
+                tool,
+                root.selection-left / root.width,
+                root.selection-top / root.height,
+                root.selection-right / root.width,
+                root.selection-bottom / root.height,
+            );
+            keyboard-focus.focus();
+        }
+        undo-clicked => { root.annotation-undo-requested(); }
+        redo-clicked => { root.annotation-redo-requested(); }
+        drag-began(pointer-x, pointer-y, item-x, item-y) => {
+            root.toolbar-dragging = true;
+            root.toolbar-drag-start-x = pointer-x;
+            root.toolbar-drag-start-y = pointer-y;
+            root.toolbar-item-start-x = item-x * 1px;
+            root.toolbar-item-start-y = item-y * 1px;
+            root.toolbar-x = self.x;
+            root.toolbar-y = self.y;
+        }
+        drag-moved(pointer-x, pointer-y) => {
+            if (root.toolbar-dragging) {
+                root.toolbar-x = max(
+                    SnowTheme.space-2,
+                    min(
+                        root.width - self.width - SnowTheme.space-2,
+                        root.toolbar-item-start-x
+                            + (pointer-x - root.toolbar-drag-start-x) * 1px,
+                    ),
+                );
+                root.toolbar-y = max(
+                    SnowTheme.space-2,
+                    min(
+                        root.height - self.height - SnowTheme.space-2,
+                        root.toolbar-item-start-y
+                            + (pointer-y - root.toolbar-drag-start-y) * 1px,
+                    ),
+                );
+            }
+        }
+        drag-ended => {
+            root.toolbar-dragging = false;
+            root.toolbar-position-x = self.x / 1px;
+            root.toolbar-position-y = self.y / 1px;
+            root.floating-position-changed(
+                0,
+                root.toolbar-position-x,
+                root.toolbar-position-y,
+            );
+            keyboard-focus.focus();
+        }
+    }
+
+    property-panel := AnnotationPropertyPanel {
+        visible: root.presentation-active && root.has-selection && root.annotation-visible
+            && (root.annotation-tool != 0 || root.has-selected-element || root.ocr-available);
+        x: root.property-x >= 0px
+            ? max(
+                SnowTheme.space-2,
+                min(root.width - self.width - SnowTheme.space-2, root.property-x),
+            )
+            : max(
+                SnowTheme.space-3,
+                min(root.width - self.width - SnowTheme.space-3, toolbar.x),
+            );
+        y: root.property-y >= 0px
+            ? max(
+                SnowTheme.space-2,
+                min(root.height - self.height - SnowTheme.space-2, root.property-y),
+            )
+            : toolbar.y > self.height + SnowTheme.space-2
+                ? toolbar.y - self.height - SnowTheme.space-2
+                : min(
+                    root.height - self.height - SnowTheme.space-2,
+                    toolbar.y + toolbar.height + SnowTheme.space-2,
+                );
+        active-tool: root.annotation-tool;
+        has-selected-element: root.has-selected-element;
+        stroke-color: root.style-stroke-color;
+        fill-color: root.style-fill-color;
+        text-color: root.style-text-color;
+        stroke-hex <=> root.style-stroke-hex;
+        fill-hex <=> root.style-fill-hex;
+        text-hex <=> root.style-text-hex;
+        stroke-width: root.style-stroke-width;
+        opacity-percent: root.style-opacity;
+        brush-size: root.style-brush-size;
+        effect-strength: root.style-effect-strength;
+        font-size: root.style-font-size;
+        bold: root.style-bold;
+        text-alignment: root.style-text-alignment;
+        serial-number: root.style-serial-number;
+        selected-is-serial: root.selected-is-serial;
+        selected-annotation-tool: root.selected-annotation-tool;
+        ocr-available: root.ocr-available;
+        active-color-slot <=> root.active-color-slot;
+        selected-text <=> root.selected-text;
+        ocr-visible: root.ocr-visible;
+        ocr-busy: root.ocr-busy;
+        ocr-selected: root.ocr-selected-text != "";
+        ocr-manual-color: root.ocr-manual-color;
+        color-submitted(slot, value) => { root.annotation-color-requested(slot, value); }
+        color-alpha-changed(slot, value) => {
+            root.annotation-color-alpha-requested(slot, value);
+        }
+        style-value-changed(field, value) => {
+            root.annotation-style-value-requested(field, value);
+        }
+        text-submitted(text) => { root.annotation-text-requested(text); }
+        layer-requested(command) => { root.annotation-layer-requested(command); }
+        delete-requested => { root.annotation-delete-requested(); }
+        ocr-copy-requested => { root.ocr-copy-requested(); }
+        ocr-visibility-requested(visible) => { root.ocr-visibility-requested(visible); }
+        ocr-auto-color-requested => { root.ocr-auto-color-requested(); }
+        input-focus-changed(focused) => { root.text-input-active = focused; }
+        drag-began(pointer-x, pointer-y, item-x, item-y) => {
+            root.property-dragging = true;
+            root.property-drag-start-x = pointer-x;
+            root.property-drag-start-y = pointer-y;
+            root.property-item-start-x = item-x * 1px;
+            root.property-item-start-y = item-y * 1px;
+            root.property-x = self.x;
+            root.property-y = self.y;
+        }
+        drag-moved(pointer-x, pointer-y) => {
+            if (root.property-dragging) {
+                root.property-x = max(
+                    SnowTheme.space-2,
+                    min(
+                        root.width - self.width - SnowTheme.space-2,
+                        root.property-item-start-x
+                            + (pointer-x - root.property-drag-start-x) * 1px,
+                    ),
+                );
+                root.property-y = max(
+                    SnowTheme.space-2,
+                    min(
+                        root.height - self.height - SnowTheme.space-2,
+                        root.property-item-start-y
+                            + (pointer-y - root.property-drag-start-y) * 1px,
+                    ),
+                );
+            }
+        }
+        drag-ended => {
+            root.property-dragging = false;
+            root.property-position-x = self.x / 1px;
+            root.property-position-y = self.y / 1px;
+            root.floating-position-changed(
+                1,
+                root.property-position-x,
+                root.property-position-y,
+            );
+            keyboard-focus.focus();
+        }
+    }
+
+    if root.presentation-active && root.magnifier-visible
+            && !root.toolbar-dragging && !root.property-dragging : ColorMagnifier {
+        x: max(
+            4px,
+            min(
+                root.width - self.width - 4px,
+                root.magnifier-primary-collides
+                    ? root.magnifier-x-alternate
+                    : root.magnifier-x-primary,
+            ),
+        );
+        y: max(
+            4px,
+            min(
+                root.height - self.height - 4px,
+                root.magnifier-primary-collides
+                    ? root.magnifier-y-alternate
+                    : root.magnifier-y-primary,
+            ),
+        );
+        source: root.magnifier-frame;
+        label: root.magnifier-label;
+        format-index: root.color-format;
     }
 
     keyboard-focus := FocusScope {
         KeyBinding {
             keys: @keys(Escape);
-            activated => { root.cancelled(); }
+            activated => { root.handle-native-escape(); }
         }
 
         KeyBinding {
             keys: @keys(Return);
             activated => { root.confirm-current-selection(); }
         }
+
+        KeyBinding {
+            keys: @keys(Control + C);
+            enabled: !root.text-input-active;
+            activated => {
+                root.context-copy-requested(
+                    false,
+                    root.selection-left / root.width,
+                    root.selection-top / root.height,
+                    root.selection-right / root.width,
+                    root.selection-bottom / root.height,
+                );
+            }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + Shift + C);
+            enabled: !root.text-input-active;
+            activated => {
+                root.context-copy-requested(
+                    true,
+                    root.selection-left / root.width,
+                    root.selection-top / root.height,
+                    root.selection-right / root.width,
+                    root.selection-bottom / root.height,
+                );
+            }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + S);
+            activated => { root.save-current-selection(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + A);
+            enabled: !root.text-input-active;
+            activated => { root.select-full-canvas(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + Z);
+            enabled: !root.text-input-active;
+            activated => { root.annotation-undo-requested(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + Y);
+            enabled: !root.text-input-active;
+            activated => { root.annotation-redo-requested(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + Shift + Z);
+            enabled: !root.text-input-active;
+            activated => { root.annotation-redo-requested(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Delete);
+            enabled: !root.text-input-active;
+            activated => { root.annotation-delete-requested(); }
+        }
+
+        KeyBinding { keys: @keys(W); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(0, -1); } }
+        KeyBinding { keys: @keys(A); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(-1, 0); } }
+        KeyBinding { keys: @keys(S); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(0, 1); } }
+        KeyBinding { keys: @keys(D); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(1, 0); } }
+        KeyBinding { keys: @keys(UpArrow); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(0, -1); } }
+        KeyBinding { keys: @keys(LeftArrow); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(-1, 0); } }
+        KeyBinding { keys: @keys(DownArrow); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(0, 1); } }
+        KeyBinding { keys: @keys(RightArrow); enabled: !root.text-input-active; activated => { root.cursor-nudge-requested(1, 0); } }
+        KeyBinding { keys: @keys(C); enabled: !root.text-input-active; activated => { root.color-copy-requested(); } }
     }
 }

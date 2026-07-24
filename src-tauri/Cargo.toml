@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "../crates/snowshot-annotate",
     "../crates/snowshot-clipboard",
     "../crates/snowshot-capture",
     "../crates/snowshot-ocr",
@@ -75,6 +76,7 @@ clipboard-win = "5.4.1"
 
 # 项目内依赖
 snow-shot-app-services = { path = "src-crates/app-services" }
+snow-shot-annotate = { path = "../crates/snowshot-annotate" }
 snow-shot-clipboard = { path = "../crates/snowshot-clipboard" }
 snow-shot-capture = { path = "../crates/snowshot-capture" }
 snow-shot-ocr = { path = "../crates/snowshot-ocr" }

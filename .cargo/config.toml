@@ -6,5 +6,5 @@ rustflags = ["-Ctarget-feature=+crt-static"]
 rustflags = ["-Ctarget-feature=+crt-static"]
 
 [env]
-ORT_LIB_LOCATION = { value = "lib", relative = true }
+ORT_LIB_LOCATION = { value = "src-tauri/lib", relative = true }
 PKG_CONFIG_ALL_STATIC = "1"

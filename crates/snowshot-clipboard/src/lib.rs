@@ -164,6 +164,10 @@ pub fn write_shared_buffer_payload(data: &[u8]) -> Result<(), ClipboardError> {
     write_rgba_image(payload.pixels(), payload.width(), payload.height())
 }
 
+pub fn write_text(text: &str) -> Result<(), ClipboardError> {
+    write_unicode_text(text)
+}
+
 fn validate_rgba_len(rgba_image: &[u8], width: u32, height: u32) -> Result<(), ClipboardError> {
     if width == 0 || height == 0 {
         return Err(ClipboardError::InvalidDimensions);
@@ -210,6 +214,17 @@ fn write_cf_dib(dib_data: &[u8]) -> Result<(), ClipboardError> {
 
 #[cfg(not(target_os = "windows"))]
 fn write_cf_dib(_dib_data: &[u8]) -> Result<(), ClipboardError> {
+    Err(ClipboardError::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "windows")]
+fn write_unicode_text(text: &str) -> Result<(), ClipboardError> {
+    clipboard_win::set_clipboard_string(text)
+        .map_err(|error| ClipboardError::Backend(format!("failed to write Unicode text: {error}")))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_unicode_text(_text: &str) -> Result<(), ClipboardError> {
     Err(ClipboardError::UnsupportedPlatform)
 }
 

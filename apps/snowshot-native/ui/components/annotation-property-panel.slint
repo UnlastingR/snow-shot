@@ -1,0 +1,502 @@
+import { LineEdit, Slider } from "std-widgets.slint";
+import { SnowTheme } from "../theme/snow-theme.slint";
+
+component EightDotHandle inherits Rectangle {
+    callback drag-began(float, float, float, float);
+    callback drag-moved(float, float);
+    callback drag-ended();
+    width: 24px;
+    background: area.has-hover ? #ffffff12 : transparent;
+    border-radius: SnowTheme.radius-sm;
+
+    for dot[index] in 8 : Rectangle {
+        x: 7px + mod(index, 2) * 6px;
+        y: (parent.height - 21px) / 2 + floor(index / 2) * 6px;
+        width: 3px;
+        height: 3px;
+        border-radius: 2px;
+        background: area.has-hover ? #d9dde2 : #8f959d;
+    }
+    area := TouchArea {
+        mouse-cursor: grab;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                    && event.button == PointerEventButton.left) {
+                root.drag-began(
+                    root.x / 1px + self.mouse-x / 1px,
+                    root.y / 1px + self.mouse-y / 1px,
+                    root.x / 1px,
+                    root.y / 1px,
+                );
+            } else if (event.kind == PointerEventKind.move && self.pressed) {
+                root.drag-moved(
+                    root.x / 1px + self.mouse-x / 1px,
+                    root.y / 1px + self.mouse-y / 1px,
+                );
+            } else if (event.kind == PointerEventKind.up
+                    || event.kind == PointerEventKind.cancel) {
+                root.drag-ended();
+            }
+        }
+    }
+}
+
+component SmallButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked();
+    width: 42px;
+    height: 26px;
+    border-radius: SnowTheme.radius-sm;
+    border-width: root.selected ? 1px : 0px;
+    border-color: SnowTheme.focus-ring;
+    background: root.selected ? #168c8259
+        : area.pressed ? #ffffff22 : area.has-hover ? #ffffff16 : #ffffff0b;
+    Text {
+        text: root.label;
+        color: #eef0f2;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ColorPreset inherits Rectangle {
+    in property <color> swatch;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: area.has-hover ? white : #ffffff55;
+    background: root.swatch;
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ColorField inherits Rectangle {
+    in property <string> label;
+    in property <color> swatch;
+    in-out property <string> value;
+    callback submitted(string);
+    callback selected();
+    callback input-focus-changed(bool);
+    width: 150px;
+    height: 30px;
+
+    Text {
+        width: 30px;
+        text: root.label;
+        color: #aeb4bc;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: 32px;
+        y: 5px;
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: #ffffff4a;
+        background: root.swatch;
+        TouchArea { clicked => { root.selected(); } }
+    }
+    edit := LineEdit {
+        x: 56px;
+        y: 1px;
+        width: 92px;
+        height: 28px;
+        text <=> root.value;
+        accepted => { root.submitted(self.text); }
+        changed has-focus => {
+            root.input-focus-changed(self.has-focus);
+            if (self.has-focus) {
+                root.selected();
+            }
+        }
+    }
+}
+
+component NumericControl inherits Rectangle {
+    in property <string> label;
+    in property <float> value;
+    in property <float> minimum;
+    in property <float> maximum;
+    callback changed(float);
+    width: 126px;
+    height: 34px;
+
+    Text {
+        width: 36px;
+        text: root.label;
+        color: #aeb4bc;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    Slider {
+        x: 38px;
+        width: 62px;
+        y: 5px;
+        height: 24px;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        changed(value) => { root.changed(value); }
+    }
+    Text {
+        x: 102px;
+        width: 24px;
+        text: round(root.value);
+        color: #eef0f2;
+        font-size: 10px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+export component AnnotationPropertyPanel inherits Rectangle {
+    in property <int> active-tool: 0;
+    in property <bool> has-selected-element: false;
+    in property <color> stroke-color;
+    in property <color> fill-color;
+    in property <color> text-color;
+    in-out property <string> stroke-hex;
+    in-out property <string> fill-hex;
+    in-out property <string> text-hex;
+    in property <float> stroke-width: 6;
+    in property <float> opacity-percent: 100;
+    in property <float> brush-size: 22;
+    in property <float> effect-strength: 55;
+    in property <float> font-size: 24;
+    in property <bool> bold: false;
+    in property <int> text-alignment: 0;
+    in property <float> serial-number: 1;
+    in property <bool> selected-is-serial: false;
+    in property <int> selected-annotation-tool: 0;
+    in property <bool> ocr-available: false;
+    in-out property <string> selected-text;
+    in property <bool> ocr-visible: false;
+    in property <bool> ocr-busy: false;
+    in property <bool> ocr-selected: false;
+    in property <bool> ocr-manual-color: false;
+    in-out property <int> active-color-slot: 0;
+    callback color-submitted(int, string);
+    callback color-alpha-changed(int, float);
+    callback style-value-changed(int, float);
+    callback text-submitted(string);
+    callback layer-requested(int);
+    callback delete-requested();
+    callback ocr-copy-requested();
+    callback ocr-visibility-requested(bool);
+    callback ocr-auto-color-requested();
+    callback drag-began(float, float, float, float);
+    callback drag-moved(float, float);
+    callback drag-ended();
+    callback input-focus-changed(bool);
+
+    private property <float> active-color-alpha:
+        root.active-color-slot == 1 ? root.fill-color.alpha * 100
+        : root.active-color-slot == 2 ? root.text-color.alpha * 100
+        : root.stroke-color.alpha * 100;
+    private property <int> effective-tool:
+        root.active-tool == 0 && root.selected-annotation-tool != 0
+            ? root.selected-annotation-tool
+            : root.active-tool;
+    private property <bool> is-shape:
+        root.effective-tool == 8 || root.effective-tool == 9 || root.effective-tool == 12;
+    private property <bool> is-line:
+        root.effective-tool == 2 || root.effective-tool == 3;
+    private property <bool> is-pen:
+        root.effective-tool == 1 || root.effective-tool == 10;
+    private property <bool> is-effect:
+        root.effective-tool == 5 || root.effective-tool == 6;
+    private property <bool> is-text: root.effective-tool == 13;
+    private property <bool> is-serial: root.effective-tool == 4;
+
+    width: 790px;
+    height: root.is-text || root.is-serial ? 176px : 142px;
+    border-radius: SnowTheme.radius-md;
+    border-width: 1px;
+    border-color: #ffffff24;
+    background: #24272bf0;
+    drop-shadow-color: #00000055;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 5px;
+
+    EightDotHandle {
+        x: 4px;
+        y: 4px;
+        height: parent.height - 8px;
+        drag-began(pointer-x, pointer-y, item-x, item-y) => {
+            root.drag-began(pointer-x, pointer-y, root.x / 1px, root.y / 1px);
+        }
+        drag-moved(pointer-x, pointer-y) => { root.drag-moved(pointer-x, pointer-y); }
+        drag-ended => { root.drag-ended(); }
+    }
+
+    VerticalLayout {
+        x: 32px;
+        y: 6px;
+        width: parent.width - 38px;
+        height: parent.height - 12px;
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: 4px;
+            ColorField {
+                visible: !root.ocr-selected
+                    && (root.is-shape || root.is-line || root.is-pen || root.is-serial);
+                label: "线";
+                swatch: root.stroke-color;
+                value <=> root.stroke-hex;
+                submitted(value) => { root.color-submitted(0, value); }
+                selected => { root.active-color-slot = 0; }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            }
+            ColorField {
+                visible: !root.ocr-selected
+                    && (root.is-shape || root.is-serial || root.is-text);
+                label: "填";
+                swatch: root.fill-color;
+                value <=> root.fill-hex;
+                submitted(value) => { root.color-submitted(1, value); }
+                selected => { root.active-color-slot = 1; }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            }
+            ColorField {
+                visible: root.ocr-selected || root.is-serial || root.is-text;
+                label: "字";
+                swatch: root.text-color;
+                value <=> root.text-hex;
+                submitted(value) => { root.color-submitted(2, value); }
+                selected => { root.active-color-slot = 2; }
+                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            }
+            SmallButton {
+                width: 50px;
+                visible: !root.ocr-selected && root.is-text;
+                label: root.bold ? "粗体✓" : "粗体";
+                selected: root.bold;
+                clicked => { root.style-value-changed(5, root.bold ? 0 : 1); }
+            }
+            SmallButton {
+                width: 34px;
+                visible: !root.ocr-selected && root.is-text;
+                label: "左";
+                selected: root.text-alignment == 0;
+                clicked => { root.style-value-changed(6, 0); }
+            }
+            SmallButton {
+                width: 34px;
+                visible: !root.ocr-selected && root.is-text;
+                label: "中";
+                selected: root.text-alignment == 1;
+                clicked => { root.style-value-changed(6, 1); }
+            }
+            SmallButton {
+                width: 34px;
+                visible: !root.ocr-selected && root.is-text;
+                label: "右";
+                selected: root.text-alignment == 2;
+                clicked => { root.style-value-changed(6, 2); }
+            }
+            SmallButton {
+                width: 54px;
+                visible: root.ocr-available;
+                label: root.ocr-visible ? "隐藏OCR" : "显示OCR";
+                clicked => { root.ocr-visibility-requested(!root.ocr-visible); }
+            }
+            SmallButton {
+                width: 62px;
+                visible: root.ocr-available;
+                label: "复制文字";
+                clicked => { root.ocr-copy-requested(); }
+            }
+            SmallButton {
+                width: 54px;
+                visible: root.ocr-selected;
+                label: "自动色";
+                selected: !root.ocr-manual-color;
+                clicked => { root.ocr-auto-color-requested(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 2px;
+            NumericControl {
+                visible: root.is-shape || root.is-line || root.is-pen;
+                label: "线宽";
+                value: root.stroke-width;
+                minimum: 1;
+                maximum: 32;
+                changed(value) => { root.style-value-changed(0, value); }
+            }
+            NumericControl {
+                visible: (root.effective-tool != 0 && root.effective-tool != 11)
+                    || root.ocr-selected;
+                label: "透明";
+                value: root.opacity-percent;
+                minimum: 0;
+                maximum: 100;
+                changed(value) => { root.style-value-changed(1, value); }
+            }
+            NumericControl {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                label: "色透";
+                value: root.active-color-alpha;
+                minimum: 0;
+                maximum: 100;
+                changed(value) => { root.color-alpha-changed(root.active-color-slot, value); }
+            }
+            NumericControl {
+                visible: root.is-pen || root.is-effect;
+                label: "笔刷";
+                value: root.brush-size;
+                minimum: 2;
+                maximum: 128;
+                changed(value) => { root.style-value-changed(2, value); }
+            }
+            NumericControl {
+                visible: root.is-effect || root.ocr-selected;
+                label: "强度";
+                value: root.effect-strength;
+                minimum: 5;
+                maximum: 100;
+                changed(value) => { root.style-value-changed(3, value); }
+            }
+            NumericControl {
+                visible: root.is-text || root.is-serial;
+                label: "字号";
+                value: root.font-size;
+                minimum: 8;
+                maximum: 128;
+                changed(value) => { root.style-value-changed(4, value); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 4px;
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #e84444;
+                clicked => { root.color-submitted(root.active-color-slot, "#E84444"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #ff8a00;
+                clicked => { root.color-submitted(root.active-color-slot, "#FF8A00"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #ffd60a;
+                clicked => { root.color-submitted(root.active-color-slot, "#FFD60A"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #1eb980;
+                clicked => { root.color-submitted(root.active-color-slot, "#1EB980"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #168cde;
+                clicked => { root.color-submitted(root.active-color-slot, "#168CDE"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #7b61ff;
+                clicked => { root.color-submitted(root.active-color-slot, "#7B61FF"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #ffffff;
+                clicked => { root.color-submitted(root.active-color-slot, "#FFFFFF"); }
+            }
+            ColorPreset {
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                swatch: #111111;
+                clicked => { root.color-submitted(root.active-color-slot, "#111111"); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                visible: root.ocr-selected || root.is-shape || root.is-line
+                    || root.is-pen || root.is-serial || root.is-text;
+                text: "颜色槽支持 HEX / RGB / HSV 输入和独立透明度";
+                color: #828891;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+            SmallButton {
+                visible: root.has-selected-element;
+                label: "置底";
+                clicked => { root.layer-requested(0); }
+            }
+            SmallButton {
+                visible: root.has-selected-element;
+                label: "下移";
+                clicked => { root.layer-requested(1); }
+            }
+            SmallButton {
+                visible: root.has-selected-element;
+                label: "上移";
+                clicked => { root.layer-requested(2); }
+            }
+            SmallButton {
+                visible: root.has-selected-element;
+                label: "置顶";
+                clicked => { root.layer-requested(3); }
+            }
+            SmallButton {
+                visible: root.has-selected-element && !root.ocr-selected;
+                label: "删除";
+                clicked => { root.delete-requested(); }
+            }
+        }
+
+        HorizontalLayout {
+            visible: root.is-text;
+            spacing: 4px;
+            Text {
+                width: 28px;
+                text: "文本";
+                color: #aeb4bc;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            text-edit := LineEdit {
+                horizontal-stretch: 1;
+                text <=> root.selected-text;
+                accepted => { root.text-submitted(self.text); }
+                changed has-focus => { root.input-focus-changed(self.has-focus); }
+            }
+        }
+
+        HorizontalLayout {
+            visible: root.is-serial || root.selected-is-serial;
+            spacing: 4px;
+            NumericControl {
+                label: "序号";
+                value: root.serial-number;
+                minimum: 1;
+                maximum: 999;
+                changed(value) => { root.style-value-changed(7, value); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: "下一枚序号会继续递增；选择已有序号后可单独修改";
+                color: #828891;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

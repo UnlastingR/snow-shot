@@ -30,7 +30,7 @@ pub struct FrozenMonitorFrame {
     rgba: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FrozenRegionFrame {
     width: u32,
     height: u32,
@@ -38,6 +38,29 @@ pub struct FrozenRegionFrame {
 }
 
 impl FrozenRegionFrame {
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, CaptureWorkflowError> {
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| CaptureWorkflowError::InvalidFrame("区域图像尺寸溢出。".to_string()))?;
+        if rgba.len() != expected {
+            return Err(CaptureWorkflowError::InvalidFrame(format!(
+                "区域像素长度无效：应为 {expected}，实际为 {}。",
+                rgba.len()
+            )));
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -48,6 +71,10 @@ impl FrozenRegionFrame {
 
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+
+    pub fn into_parts(self) -> (u32, u32, Vec<u8>) {
+        (self.width, self.height, self.rgba)
     }
 }
 
@@ -78,6 +105,7 @@ pub enum CaptureWorkflowError {
     Capture(snow_shot_capture::CaptureError),
     Clipboard(snow_shot_clipboard::ClipboardError),
     Save(std::io::Error),
+    InvalidFrame(String),
 }
 
 impl fmt::Display for CaptureWorkflowError {
@@ -86,6 +114,7 @@ impl fmt::Display for CaptureWorkflowError {
             Self::Capture(error) => write!(formatter, "截图失败：{error}"),
             Self::Clipboard(error) => write!(formatter, "写入剪贴板失败：{error}"),
             Self::Save(error) => write!(formatter, "保存截图失败：{error}"),
+            Self::InvalidFrame(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -115,14 +144,10 @@ pub fn copy_frozen_monitor_to_clipboard(
     write_to_clipboard(frame.rgba(), frame.width(), frame.height())
 }
 
-pub fn copy_frozen_region_to_clipboard(
-    frame: &FrozenMonitorFrame,
-    region: PixelRect,
+pub fn copy_region_frame_to_clipboard(
+    frame: &FrozenRegionFrame,
 ) -> Result<CaptureSummary, CaptureWorkflowError> {
-    let cropped = crop_rgba_pixels(frame.rgba(), frame.width(), frame.height(), region)
-        .map_err(CaptureWorkflowError::Capture)?;
-
-    write_to_clipboard(&cropped, region.width(), region.height())
+    write_to_clipboard(frame.rgba(), frame.width(), frame.height())
 }
 
 pub fn extract_frozen_region(
@@ -139,20 +164,22 @@ pub fn extract_frozen_region(
     })
 }
 
-pub fn save_frozen_region_to_path(
-    frame: &FrozenMonitorFrame,
-    region: PixelRect,
+pub fn save_region_frame_to_path(
+    frame: &FrozenRegionFrame,
     path: &Path,
 ) -> Result<CaptureSummary, CaptureWorkflowError> {
-    let cropped = crop_rgba_pixels(frame.rgba(), frame.width(), frame.height(), region)
-        .map_err(CaptureWorkflowError::Capture)?;
-    let png = encode_rgba_pixels(&cropped, region.width(), region.height(), ImageEncoder::Png)
-        .map_err(CaptureWorkflowError::Capture)?;
+    let png = encode_rgba_pixels(
+        frame.rgba(),
+        frame.width(),
+        frame.height(),
+        ImageEncoder::Png,
+    )
+    .map_err(CaptureWorkflowError::Capture)?;
     std::fs::write(path, png).map_err(CaptureWorkflowError::Save)?;
 
     Ok(CaptureSummary {
-        width: region.width(),
-        height: region.height(),
+        width: frame.width(),
+        height: frame.height(),
     })
 }
 
@@ -197,8 +224,8 @@ mod tests {
             std::process::id()
         ));
 
-        let summary =
-            save_frozen_region_to_path(&frame, PixelRect::new(1, 0, 1, 2).unwrap(), &path).unwrap();
+        let region = extract_frozen_region(&frame, PixelRect::new(1, 0, 1, 2).unwrap()).unwrap();
+        let summary = save_region_frame_to_path(&region, &path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
 

@@ -1,14 +1,283 @@
 import { SnowTheme } from "../theme/snow-theme.slint";
 import { SnowButton } from "buttons.slint";
 
+component EightDotHandle inherits Rectangle {
+    callback drag-began(float, float, float, float);
+    callback drag-moved(float, float);
+    callback drag-ended();
+
+    width: 24px;
+    background: handle-area.has-hover ? #ffffff12 : transparent;
+    border-radius: SnowTheme.radius-sm;
+
+    for dot[index] in 8 : Rectangle {
+        x: 7px + mod(index, 2) * 6px;
+        y: (parent.height - 21px) / 2 + floor(index / 2) * 6px;
+        width: 3px;
+        height: 3px;
+        border-radius: 2px;
+        background: handle-area.has-hover ? #d9dde2 : #8f959d;
+    }
+
+    handle-area := TouchArea {
+        mouse-cursor: grab;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                    && event.button == PointerEventButton.left) {
+                root.drag-began(
+                    root.x / 1px + self.mouse-x / 1px,
+                    root.y / 1px + self.mouse-y / 1px,
+                    root.x / 1px,
+                    root.y / 1px,
+                );
+            } else if (event.kind == PointerEventKind.move && self.pressed) {
+                root.drag-moved(
+                    root.x / 1px + self.mouse-x / 1px,
+                    root.y / 1px + self.mouse-y / 1px,
+                );
+            } else if (event.kind == PointerEventKind.up
+                    || event.kind == PointerEventKind.cancel) {
+                root.drag-ended();
+            }
+        }
+    }
+}
+
+component ToolGlyph inherits Path {
+    in property <int> kind: 0;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands:
+        root.kind == 0 ? "M 5 3 L 18 11 L 11.5 13 L 15 20 L 11.5 21.5 L 8 14.5 L 4 19 Z"
+        : root.kind == 1 ? "M 4 19 L 7 13 L 16 4 L 20 8 L 11 17 Z M 6 20 H 18"
+        : root.kind == 2 ? "M 4 20 L 20 4"
+        : root.kind == 3 ? "M 4 20 L 18 6 M 12 6 H 18 V 12"
+        : root.kind == 4 ? "M 12 3 C 17 3 21 7 21 12 C 21 17 17 21 12 21 C 7 21 3 17 3 12 C 3 7 7 3 12 3 M 10 8 H 12 V 16 M 10 16 H 15"
+        : root.kind == 5 ? "M 4 4 H 10 V 10 H 4 Z M 14 4 H 20 V 10 H 14 Z M 4 14 H 10 V 20 H 4 Z M 14 14 H 20 V 20 H 14 Z"
+        : root.kind == 6 ? "M 12 3 C 9 8 5 11 5 15 C 5 19 8 21 12 21 C 16 21 19 19 19 15 C 19 11 15 8 12 3 Z"
+        : root.kind == 7 ? "M 14 4 L 20 10 L 17 13 L 15 11 L 8 18 L 4 19 L 5 15 L 12 8 L 10 6 Z"
+        : root.kind == 8 ? "M 4 5 H 20 V 19 H 4 Z"
+        : root.kind == 9 ? "M 12 4 C 17 4 21 7.5 21 12 C 21 16.5 17 20 12 20 C 7 20 3 16.5 3 12 C 3 7.5 7 4 12 4 Z"
+        : root.kind == 10 ? "M 6 16 L 15 7 L 19 11 L 10 20 H 6 Z M 4 21 H 18"
+        : root.kind == 11 ? "M 8 4 L 20 16 L 15 21 H 9 L 3 15 Z M 6 12 L 13 19"
+        : root.kind == 12 ? "M 12 3 L 21 12 L 12 21 L 3 12 Z"
+        : root.kind == 13 ? "M 5 5 H 19 M 12 5 V 20 M 8 20 H 16"
+        : "M 5 3 H 16 L 20 7 V 21 H 5 Z M 16 3 V 7 H 20 M 8 11 H 17 M 8 15 H 17";
+    fill: transparent;
+    stroke: #eef0f2;
+    stroke-width: 1.8px;
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> label;
+    in property <int> icon-kind: -1;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    in property <bool> compact: false;
+    callback clicked();
+
+    width: root.compact ? 34px : 52px;
+    height: 32px;
+    border-radius: SnowTheme.radius-sm;
+    border-width: root.selected ? 1px : 0px;
+    border-color: SnowTheme.focus-ring;
+    background: !root.enabled
+        ? #ffffff08
+        : root.selected
+            ? #168c8259
+            : hit.pressed
+                ? #ffffff24
+                : hit.has-hover
+                    ? #ffffff18
+                    : transparent;
+
+    if root.icon-kind >= 0 : ToolGlyph {
+        x: 4px;
+        y: (parent.height - self.height) / 2;
+        kind: root.icon-kind;
+        opacity: root.enabled ? 1 : 0.35;
+    }
+
+    Text {
+        x: root.icon-kind >= 0 ? 23px : 0px;
+        width: root.icon-kind >= 0 ? parent.width - 25px : parent.width;
+        text: root.label;
+        color: root.enabled
+            ? root.selected ? #b9f2ec : #eef0f2
+            : #747982;
+        font-size: root.compact ? 12px : 12px;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component UndoIcon inherits Path {
+    in property <bool> reverse: false;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: root.reverse
+        ? "M 15 6 L 20 11 L 15 16 M 19.5 11 H 10 C 6.5 11 4 13.5 4 17"
+        : "M 9 6 L 4 11 L 9 16 M 4.5 11 H 14 C 17.5 11 20 13.5 20 17";
+    fill: transparent;
+    stroke: #eef0f2;
+    stroke-width: 2px;
+}
+
+component IconButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <bool> reverse: false;
+    callback clicked();
+    width: 34px;
+    height: 32px;
+    border-radius: SnowTheme.radius-sm;
+    background: !root.enabled
+        ? transparent
+        : hit.pressed ? #ffffff24 : hit.has-hover ? #ffffff18 : transparent;
+
+    UndoIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        reverse: root.reverse;
+        opacity: root.enabled ? 1 : 0.35;
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SubtoolPopup inherits Rectangle {
+    in property <[int]> tools;
+    in property <[string]> labels;
+    callback selected(int);
+
+    width: root.tools.length * 58px + 8px;
+    height: 40px;
+    border-radius: SnowTheme.radius-sm;
+    border-width: 1px;
+    border-color: #ffffff24;
+    background: #24272bf5;
+    drop-shadow-color: #00000066;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+
+    HorizontalLayout {
+        padding: 4px;
+        spacing: 2px;
+        for tool[index] in root.tools : ToolButton {
+            width: 54px;
+            label: root.labels[index];
+            icon-kind: tool;
+            clicked => { root.selected(tool); }
+        }
+    }
+}
+
+component GroupButton inherits Rectangle {
+    in property <string> label;
+    in property <int> icon-kind;
+    in property <bool> selected;
+    callback main-clicked();
+    callback menu-clicked();
+    callback menu-hovered();
+    width: 64px;
+    height: 32px;
+    border-radius: SnowTheme.radius-sm;
+    border-width: root.selected ? 1px : 0px;
+    border-color: SnowTheme.focus-ring;
+    background: root.selected
+        ? #168c8259
+        : main-area.pressed || arrow-area.pressed
+            ? #ffffff24
+            : main-area.has-hover || arrow-area.has-hover
+                ? #ffffff18
+                : transparent;
+
+    ToolGlyph {
+        x: 3px;
+        y: 7px;
+        kind: root.icon-kind;
+    }
+    Text {
+        x: 22px;
+        width: parent.width - 39px;
+        text: root.label;
+        color: root.selected ? #b9f2ec : #eef0f2;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Path {
+        x: parent.width - 17px;
+        y: 11px;
+        width: 14px;
+        height: 10px;
+        viewbox-width: 14;
+        viewbox-height: 10;
+        commands: "M 3 3 L 7 7 L 11 3";
+        fill: transparent;
+        stroke: #aeb4bc;
+        stroke-width: 1.5px;
+    }
+    main-area := TouchArea {
+        width: parent.width - 18px;
+        clicked => { root.main-clicked(); }
+    }
+    arrow-area := TouchArea {
+        x: parent.width - 18px;
+        width: 18px;
+        clicked => { root.menu-clicked(); }
+        changed has-hover => {
+            if (self.has-hover) {
+                root.menu-hovered();
+            }
+        }
+    }
+}
+
 export component CaptureToolbar inherits Rectangle {
+    out property <bool> menu-open: root.open-group != 0;
+    in property <int> active-tool: 0;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    in property <color> active-color: #e84444;
+    in property <string> color-label: "#E84444";
+    in property <bool> ocr-busy: false;
+    in property <string> ocr-status: "";
+    in-out property <int> last-shape: 8;
+    in-out property <int> last-line: 3;
+    in-out property <int> last-pen: 1;
+    in-out property <int> last-privacy: 5;
     callback confirm-clicked();
     callback save-clicked();
     callback pin-clicked();
+    callback ocr-clicked();
     callback cancel-clicked();
+    callback tool-selected(int);
+    callback undo-clicked();
+    callback redo-clicked();
+    callback drag-began(float, float, float, float);
+    callback drag-moved(float, float);
+    callback drag-ended();
 
-    width: 358px;
-    height: 48px;
+    private property <int> open-group: 0;
+
+    public function dismiss-menu() {
+        root.open-group = 0;
+    }
+
+    width: 850px;
+    height: 84px;
     border-radius: SnowTheme.radius-md;
     border-width: 1px;
     border-color: #ffffff26;
@@ -17,36 +286,196 @@ export component CaptureToolbar inherits Rectangle {
     drop-shadow-blur: 18px;
     drop-shadow-offset-y: 6px;
 
-    HorizontalLayout {
-        padding-left: SnowTheme.space-2;
-        padding-right: SnowTheme.space-2;
-        padding-top: SnowTheme.space-2;
-        padding-bottom: SnowTheme.space-2;
-        spacing: SnowTheme.space-2;
+    EightDotHandle {
+        x: 4px;
+        y: 4px;
+        height: parent.height - 8px;
+        drag-began(pointer-x, pointer-y, item-x, item-y) => {
+            root.drag-began(pointer-x, pointer-y, root.x / 1px, root.y / 1px);
+        }
+        drag-moved(pointer-x, pointer-y) => {
+            root.drag-moved(pointer-x, pointer-y);
+        }
+        drag-ended => { root.drag-ended(); }
+    }
 
-        SnowButton {
-            width: 76px;
-            label: "取消";
-            clicked => { root.cancel-clicked(); }
+    VerticalLayout {
+        x: 30px;
+        y: 6px;
+        width: parent.width - 36px;
+        height: parent.height - 12px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 2px;
+
+            ToolButton {
+                label: "选择";
+                icon-kind: 0;
+                selected: root.active-tool == 0;
+                clicked => { root.open-group = 0; root.tool-selected(0); }
+            }
+            GroupButton {
+                icon-kind: root.last-shape;
+                label: root.last-shape == 9 ? "椭圆"
+                    : root.last-shape == 12 ? "菱形" : "矩形";
+                selected: root.active-tool == 8
+                    || root.active-tool == 9 || root.active-tool == 12;
+                main-clicked => { root.open-group = 0; root.tool-selected(root.last-shape); }
+                menu-clicked => { root.open-group = root.open-group == 1 ? 0 : 1; }
+                menu-hovered => { root.open-group = 1; }
+            }
+            GroupButton {
+                icon-kind: root.last-line;
+                label: root.last-line == 2 ? "线段" : "箭头";
+                selected: root.active-tool == 2 || root.active-tool == 3;
+                main-clicked => { root.open-group = 0; root.tool-selected(root.last-line); }
+                menu-clicked => { root.open-group = root.open-group == 2 ? 0 : 2; }
+                menu-hovered => { root.open-group = 2; }
+            }
+            GroupButton {
+                icon-kind: root.last-pen;
+                label: root.last-pen == 10 ? "高亮" : "画笔";
+                selected: root.active-tool == 1 || root.active-tool == 10;
+                main-clicked => { root.open-group = 0; root.tool-selected(root.last-pen); }
+                menu-clicked => { root.open-group = root.open-group == 3 ? 0 : 3; }
+                menu-hovered => { root.open-group = 3; }
+            }
+            ToolButton {
+                label: "序号";
+                icon-kind: 4;
+                selected: root.active-tool == 4;
+                clicked => { root.open-group = 0; root.tool-selected(4); }
+            }
+            ToolButton {
+                label: "文本";
+                icon-kind: 13;
+                selected: root.active-tool == 13;
+                clicked => { root.open-group = 0; root.tool-selected(13); }
+            }
+            GroupButton {
+                icon-kind: root.last-privacy;
+                label: root.last-privacy == 6 ? "模糊" : "马赛克";
+                selected: root.active-tool == 5 || root.active-tool == 6;
+                main-clicked => { root.open-group = 0; root.tool-selected(root.last-privacy); }
+                menu-clicked => { root.open-group = root.open-group == 4 ? 0 : 4; }
+                menu-hovered => { root.open-group = 4; }
+            }
+            ToolButton {
+                label: "橡皮";
+                icon-kind: 11;
+                selected: root.active-tool == 11;
+                clicked => { root.open-group = 0; root.tool-selected(11); }
+            }
+            ToolButton {
+                label: "取色";
+                icon-kind: 7;
+                selected: root.active-tool == 7;
+                clicked => { root.open-group = 0; root.tool-selected(7); }
+            }
+            ToolButton {
+                width: 58px;
+                label: root.ocr-busy ? "OCR…" : "OCR";
+                icon-kind: 14;
+                selected: false;
+                enabled: !root.ocr-busy;
+                clicked => { root.open-group = 0; root.ocr-clicked(); }
+            }
+            IconButton {
+                enabled: root.can-undo;
+                clicked => { root.undo-clicked(); }
+            }
+            IconButton {
+                enabled: root.can-redo;
+                reverse: true;
+                clicked => { root.redo-clicked(); }
+            }
+            Rectangle {
+                width: 44px;
+                height: 30px;
+                border-radius: SnowTheme.radius-sm;
+                border-width: 1px;
+                border-color: #ffffff36;
+                background: root.active-color;
+                Text {
+                    y: parent.height - 12px;
+                    width: parent.width;
+                    height: 12px;
+                    text: root.color-label;
+                    color: white;
+                    font-size: 8px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
 
-        SnowButton {
-            width: 76px;
-            label: "复制";
-            clicked => { root.confirm-clicked(); }
-        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: SnowTheme.space-2;
 
-        SnowButton {
-            width: 76px;
-            label: "贴图";
-            clicked => { root.pin-clicked(); }
+            Text {
+                horizontal-stretch: 1;
+                text: root.ocr-status;
+                color: #aeb4bc;
+                font-size: 11px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            SnowButton { width: 58px; label: "关闭"; clicked => { root.cancel-clicked(); } }
+            SnowButton { width: 58px; label: "复制"; clicked => { root.confirm-clicked(); } }
+            SnowButton { width: 58px; label: "贴图"; clicked => { root.pin-clicked(); } }
+            SnowButton {
+                width: 64px;
+                label: "保存";
+                primary: true;
+                clicked => { root.save-clicked(); }
+            }
         }
+    }
 
-        SnowButton {
-            width: 90px;
-            label: "保存";
-            primary: true;
-            clicked => { root.save-clicked(); }
+    if root.open-group == 1 : SubtoolPopup {
+        x: 68px;
+        y: -44px;
+        tools: [8, 9, 12];
+        labels: ["矩形", "椭圆", "菱形"];
+        selected(tool) => {
+            root.last-shape = tool;
+            root.open-group = 0;
+            root.tool-selected(tool);
+        }
+    }
+    if root.open-group == 2 : SubtoolPopup {
+        x: 134px;
+        y: -44px;
+        tools: [3, 2];
+        labels: ["箭头", "线段"];
+        selected(tool) => {
+            root.last-line = tool;
+            root.open-group = 0;
+            root.tool-selected(tool);
+        }
+    }
+    if root.open-group == 3 : SubtoolPopup {
+        x: 200px;
+        y: -44px;
+        tools: [1, 10];
+        labels: ["画笔", "高亮"];
+        selected(tool) => {
+            root.last-pen = tool;
+            root.open-group = 0;
+            root.tool-selected(tool);
+        }
+    }
+    if root.open-group == 4 : SubtoolPopup {
+        x: 416px;
+        y: -44px;
+        tools: [5, 6];
+        labels: ["马赛克", "模糊"];
+        selected(tool) => {
+            root.last-privacy = tool;
+            root.open-group = 0;
+            root.tool-selected(tool);
         }
     }
 }

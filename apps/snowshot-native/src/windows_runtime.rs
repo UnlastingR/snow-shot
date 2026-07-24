@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak as RcWeak};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -8,19 +8,30 @@ use std::time::Duration;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, PhysicalPosition, PhysicalSize, RenderingState,
-    Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
+    CloseRequestResponse, Color, ComponentHandle, Image, PhysicalPosition, PhysicalSize,
+    RenderingState, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
+};
+use snow_shot_annotate::{
+    AnnotationDocument, AnnotationTool, ElementStyle, LayerCommand, OcrBlock, OcrLayerStyle, Point,
+    RgbaColor, StylePatch, TextAlignment,
 };
 use snow_shot_capture::PixelRect;
+use snow_shot_ocr::OcrDetectResult;
 use snow_shot_window::{WindowRect, WindowTarget, list_windows};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LEFT, VK_RIGHT, VK_SHIFT,
+    VK_UP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
 use crate::capture_workflow::{
     CaptureWorkflowError, FrozenMonitorFrame, FrozenRegionFrame, capture_monitor_to_clipboard,
-    copy_frozen_region_to_clipboard, extract_frozen_region, freeze_monitor_under_cursor,
-    save_frozen_region_to_path,
+    copy_region_frame_to_clipboard, extract_frozen_region, freeze_monitor_under_cursor,
+    save_region_frame_to_path,
 };
+use crate::native_settings::NativeSettings;
+use crate::ocr_workflow::OcrWorker;
 use crate::resize_geometry::project_size_to_aspect;
 use crate::windows_pin::{
     PinCompositor, PinFrame, destroy_pin_window, hide_pin_window, is_pin_window, show_pin_window,
@@ -42,6 +53,7 @@ type SharedCaptureSession = Arc<CaptureSession>;
 type SharedPins = Rc<RefCell<PinCollection>>;
 type SharedCaptureWindow = Rc<RefCell<Option<CaptureWindow>>>;
 type WeakCaptureWindow = RcWeak<RefCell<Option<CaptureWindow>>>;
+type SharedOcrContext = Rc<OcrContext>;
 
 #[derive(Default)]
 struct CaptureSession {
@@ -50,6 +62,68 @@ struct CaptureSession {
     finishing: AtomicBool,
     frame: Mutex<Option<FrozenMonitorFrame>>,
     window_targets: Mutex<Vec<WindowTarget>>,
+    annotation: Mutex<Option<AnnotationState>>,
+    settings: Mutex<NativeSettings>,
+    sampled_color: Mutex<Option<SampledColor>>,
+    floating_panels: Mutex<FloatingPanelPositions>,
+    color_format: AtomicU8,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FloatingPanelPositions {
+    toolbar: Option<FloatPoint>,
+    properties: Option<FloatPoint>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SampledColor {
+    color: RgbaColor,
+    x: i32,
+    y: i32,
+}
+
+struct AnnotationState {
+    region: PixelRect,
+    document: AnnotationDocument,
+    tool: i32,
+    previous_tool: i32,
+    color: RgbaColor,
+    stroke_width: f32,
+    style: ElementStyle,
+}
+
+struct AnnotationUiSnapshot {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    tool: i32,
+    can_undo: bool,
+    can_redo: bool,
+    color: RgbaColor,
+    color_label: String,
+    selected_ocr_text: String,
+    ocr_manual_color: bool,
+    ocr_text: String,
+    ocr_visible: bool,
+    stroke_color: RgbaColor,
+    fill_color: RgbaColor,
+    text_color: RgbaColor,
+    stroke_hex: String,
+    fill_hex: String,
+    text_hex: String,
+    stroke_width: f32,
+    opacity_percent: f32,
+    brush_size: f32,
+    effect_percent: f32,
+    font_size: f32,
+    bold: bool,
+    text_alignment: i32,
+    serial_number: f32,
+    selected_is_serial: bool,
+    selected_tool: i32,
+    ocr_available: bool,
+    selected_text: String,
+    has_selected_element: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,6 +273,10 @@ struct PinEntry {
     hwnd: HWND,
 }
 
+struct OcrContext {
+    worker: Option<OcrWorker>,
+}
+
 #[derive(Default)]
 struct PinCollection {
     entries: Vec<PinEntry>,
@@ -240,6 +318,7 @@ pub struct WindowsRuntime {
     _hotkeys: Option<HotkeyRegistration>,
     _escape_timer: Timer,
     _capture_window: SharedCaptureWindow,
+    _ocr_context: SharedOcrContext,
 }
 
 impl WindowsRuntime {
@@ -247,15 +326,24 @@ impl WindowsRuntime {
         app.window()
             .on_close_requested(|| CloseRequestResponse::HideWindow);
 
-        let session = Arc::new(CaptureSession::default());
+        let session = Arc::new(CaptureSession {
+            settings: Mutex::new(NativeSettings::load()),
+            ..CaptureSession::default()
+        });
         let pins = Rc::new(RefCell::new(PinCollection::default()));
         let capture_window = Rc::new(RefCell::new(None));
+        let ocr_context = Rc::new(OcrContext {
+            worker: OcrWorker::start()
+                .map_err(|error| app.set_runtime_status(error.into()))
+                .ok(),
+        });
 
         bind_capture_ready_callback(
             app,
             Rc::clone(&capture_window),
             Arc::clone(&session),
             Rc::clone(&pins),
+            Rc::clone(&ocr_context),
         );
         bind_pin_visibility_callback(app, Rc::clone(&pins));
         bind_app_callbacks(app, Arc::clone(&session));
@@ -269,6 +357,7 @@ impl WindowsRuntime {
             _hotkeys: hotkeys,
             _escape_timer: escape_timer,
             _capture_window: capture_window,
+            _ocr_context: ocr_context,
         }
     }
 }
@@ -348,9 +437,13 @@ fn register_global_hotkeys(
 fn watch_capture_escape(capture_window: WeakCaptureWindow, session: SharedCaptureSession) -> Timer {
     let timer = Timer::default();
     let mut escape_was_down = false;
+    let mut shift_was_down = false;
+    let mut shift_was_used = false;
     timer.start(TimerMode::Repeated, ESCAPE_POLL_INTERVAL, move || {
         if !session.visible.load(Ordering::Acquire) {
             escape_was_down = false;
+            shift_was_down = false;
+            shift_was_used = false;
             return;
         }
 
@@ -361,9 +454,47 @@ fn watch_capture_escape(capture_window: WeakCaptureWindow, session: SharedCaptur
             && let Some(slot) = capture_window.upgrade()
             && let Some(capture) = slot.borrow().as_ref()
         {
-            capture.invoke_cancelled();
+            capture.invoke_handle_native_escape();
         }
         escape_was_down = escape_is_down;
+
+        // Modifier-only shortcuts are not represented by Slint KeyBinding. Poll Shift and only
+        // cycle the color format when it was pressed and released without participating in
+        // selection resizing, another shortcut, or cursor movement.
+        let shift_is_down = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000 != 0;
+        if shift_is_down && !shift_was_down {
+            shift_was_used = false;
+        }
+        if shift_is_down
+            && [
+                VK_LBUTTON.0 as i32,
+                VK_CONTROL.0 as i32,
+                VK_LEFT.0 as i32,
+                VK_RIGHT.0 as i32,
+                VK_UP.0 as i32,
+                VK_DOWN.0 as i32,
+                b'W' as i32,
+                b'A' as i32,
+                b'S' as i32,
+                b'D' as i32,
+                b'C' as i32,
+                b'Z' as i32,
+            ]
+            .into_iter()
+            .any(|key| unsafe { GetAsyncKeyState(key) } as u16 & 0x8000 != 0)
+        {
+            shift_was_used = true;
+        }
+        if !shift_is_down
+            && shift_was_down
+            && !shift_was_used
+            && let Some(slot) = capture_window.upgrade()
+            && let Some(capture) = slot.borrow().as_ref()
+            && !capture.get_text_input_active()
+        {
+            capture.invoke_color_format_cycle_requested();
+        }
+        shift_was_down = shift_is_down;
     });
     timer
 }
@@ -374,22 +505,16 @@ fn bind_capture_callbacks(
     capture_window: WeakCaptureWindow,
     session: SharedCaptureSession,
     pins: SharedPins,
+    ocr: SharedOcrContext,
 ) {
     let app_weak = app.as_weak();
     let confirm_capture_window = capture_window.clone();
     let confirm_session = Arc::clone(&session);
     capture.on_selection_confirmed(move |left, top, right, bottom| {
-        let result = confirm_session
-            .frame
-            .lock()
-            .map_err(|_| "截图会话状态不可用。".to_string())
-            .and_then(|guard| {
-                let frame = guard
-                    .as_ref()
-                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
-                let region = normalized_region(frame, left, top, right, bottom)
-                    .map_err(|error| error.to_string())?;
-                copy_frozen_region_to_clipboard(frame, region).map_err(|error| error.to_string())
+        let result = selection_region(&confirm_session, left, top, right, bottom)
+            .and_then(|region| selected_region_frame(&confirm_session, region))
+            .and_then(|frame| {
+                copy_region_frame_to_clipboard(&frame).map_err(|error| error.to_string())
             });
 
         finish_region_capture(
@@ -411,6 +536,7 @@ fn bind_capture_callbacks(
     let save_capture_window = capture_window.clone();
     let save_session = Arc::clone(&session);
     let save_pins = Rc::clone(&pins);
+    let save_ocr = Rc::clone(&ocr);
     capture.on_selection_save_requested(move |left, top, right, bottom| {
         let selection = FloatRect {
             left,
@@ -418,20 +544,11 @@ fn bind_capture_callbacks(
             right,
             bottom,
         };
-        let region = save_session
-            .frame
-            .lock()
-            .map_err(|_| "截图会话状态不可用。".to_string())
-            .and_then(|guard| {
-                let frame = guard
-                    .as_ref()
-                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
-                normalized_region(frame, left, top, right, bottom)
-                    .map_err(|error| error.to_string())
-            });
+        let selected = selection_region(&save_session, left, top, right, bottom)
+            .and_then(|region| selected_region_frame(&save_session, region));
 
-        let region = match region {
-            Ok(region) => region,
+        let selected = match selected {
+            Ok(selected) => selected,
             Err(error) => {
                 finish_region_capture(
                     app_weak.clone(),
@@ -447,6 +564,7 @@ fn bind_capture_callbacks(
         let dialog_capture_window = save_capture_window.clone();
         let dialog_session = Arc::clone(&save_session);
         let dialog_pins = Rc::clone(&save_pins);
+        let dialog_ocr = Rc::clone(&save_ocr);
         suspend_region_capture(
             save_capture_window.clone(),
             Arc::clone(&save_session),
@@ -462,23 +580,15 @@ fn bind_capture_callbacks(
                         dialog_capture_window,
                         dialog_session,
                         dialog_pins,
+                        dialog_ocr,
                         Some(selection),
                         "已取消保存，当前选区仍可继续处理。",
                     );
                     return;
                 };
 
-                let result = dialog_session
-                    .frame
-                    .lock()
-                    .map_err(|_| "截图会话状态不可用。".to_string())
-                    .and_then(|guard| {
-                        let frame = guard.as_ref().ok_or_else(|| {
-                            format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。")
-                        })?;
-                        save_frozen_region_to_path(frame, region, &path)
-                            .map_err(|error| error.to_string())
-                    });
+                let result =
+                    save_region_frame_to_path(&selected, &path).map_err(|error| error.to_string());
 
                 match result {
                     Ok(summary) => finish_region_capture(
@@ -497,6 +607,7 @@ fn bind_capture_callbacks(
                         dialog_capture_window,
                         dialog_session,
                         dialog_pins,
+                        dialog_ocr,
                         Some(selection),
                         &error,
                     ),
@@ -510,26 +621,25 @@ fn bind_capture_callbacks(
     let pin_session = Arc::clone(&session);
     let presented_pins = Rc::clone(&pins);
     capture.on_selection_pin_requested(move |left, top, right, bottom| {
-        let result = pin_session
-            .frame
-            .lock()
-            .map_err(|_| "截图会话状态不可用。".to_string())
-            .and_then(|guard| {
-                let frame = guard
-                    .as_ref()
-                    .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
-                let region = normalized_region(frame, left, top, right, bottom)
-                    .map_err(|error| error.to_string())?;
-                let pinned =
-                    extract_frozen_region(frame, region).map_err(|error| error.to_string())?;
-                let region_x = i32::try_from(region.x()).unwrap_or(i32::MAX);
-                let region_y = i32::try_from(region.y()).unwrap_or(i32::MAX);
-
-                Ok((
-                    frame.origin_x().saturating_add(region_x),
-                    frame.origin_y().saturating_add(region_y),
-                    pinned,
-                ))
+        let result = selection_region(&pin_session, left, top, right, bottom)
+            .and_then(|region| {
+                let origin = pin_session
+                    .frame
+                    .lock()
+                    .map_err(|_| "截图会话状态不可用。".to_string())
+                    .and_then(|guard| {
+                        let frame = guard.as_ref().ok_or_else(|| {
+                            format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。")
+                        })?;
+                        let region_x = i32::try_from(region.x()).unwrap_or(i32::MAX);
+                        let region_y = i32::try_from(region.y()).unwrap_or(i32::MAX);
+                        Ok((
+                            frame.origin_x().saturating_add(region_x),
+                            frame.origin_y().saturating_add(region_y),
+                        ))
+                    })?;
+                let pinned = selected_region_frame(&pin_session, region)?;
+                Ok((origin.0, origin.1, pinned))
             })
             .and_then(|(origin_x, origin_y, pinned)| {
                 create_pinned_frame(&presented_pins, pinned, origin_x, origin_y)
@@ -543,6 +653,737 @@ fn bind_capture_callbacks(
                 format!("已创建 {width}×{height} 置顶贴图。"),
             ),
             Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let ocr_session = Arc::clone(&session);
+    let ocr_context = Rc::clone(&ocr);
+    let ocr_capture = capture.as_weak();
+    capture.on_selection_ocr_requested(move |left, top, right, bottom| {
+        let selected =
+            selection_region(&ocr_session, left, top, right, bottom).and_then(|region| {
+                let frame = {
+                    let guard = ocr_session
+                        .frame
+                        .lock()
+                        .map_err(|_| "截图会话状态不可用。".to_string())?;
+                    let frozen = guard.as_ref().ok_or_else(|| {
+                        format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。")
+                    })?;
+                    extract_frozen_region(frozen, region).map_err(|error| error.to_string())?
+                };
+                ensure_annotation_state(&ocr_session, region, 0)?;
+                Ok((region, frame))
+            });
+
+        let (region, frame) = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                set_status(&app_weak, &error);
+                return;
+            }
+        };
+        let Some(capture) = ocr_capture.upgrade() else {
+            set_status(&app_weak, "区域截图窗口已不可用。");
+            return;
+        };
+        let Some(worker) = ocr_context.worker.as_ref() else {
+            set_status(&app_weak, "OCR 后台任务未能启动。");
+            return;
+        };
+
+        capture.set_ocr_busy(true);
+        capture.set_ocr_status("正在准备 OCR…".into());
+        let progress_capture = ocr_capture.clone();
+        let progress_app = app_weak.clone();
+        let completion_capture = ocr_capture.clone();
+        let completion_app = app_weak.clone();
+        let completion_session = Arc::clone(&ocr_session);
+        if let Err(error) = worker.detect(
+            frame,
+            move |status| {
+                let capture = progress_capture.clone();
+                let app = progress_app.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(capture) = capture.upgrade() {
+                        capture.set_ocr_busy(true);
+                        capture.set_ocr_status(status.clone().into());
+                    }
+                    set_status(&app, &status);
+                });
+            },
+            move |result| {
+                let capture = completion_capture.clone();
+                let app = completion_app.clone();
+                let session = Arc::clone(&completion_session);
+                let converted = result.map(ocr_blocks_from_result);
+                let _ = slint::invoke_from_event_loop(move || match converted {
+                    Ok(blocks) => {
+                        let count = blocks.len();
+                        let snapshot = session
+                            .annotation
+                            .lock()
+                            .map_err(|_| "标注会话状态不可用。".to_string())
+                            .and_then(|mut annotation| {
+                                let annotation = annotation
+                                    .as_mut()
+                                    .filter(|annotation| annotation.region == region)
+                                    .ok_or_else(|| "OCR 对应的选区已经变化。".to_string())?;
+                                annotation.document.set_ocr_blocks(blocks);
+                                Ok(annotation_snapshot(annotation))
+                            });
+                        match snapshot {
+                            Ok(snapshot) => {
+                                let status = if count == 0 {
+                                    "识别完成，没有发现文字。".to_string()
+                                } else {
+                                    format!("识别完成，共 {count} 个文字块。")
+                                };
+                                if let Some(capture) = capture.upgrade() {
+                                    capture.set_ocr_busy(false);
+                                    capture.set_ocr_status(status.clone().into());
+                                    if let Err(error) =
+                                        apply_annotation_snapshot(&capture, snapshot)
+                                    {
+                                        set_status(&app, &error);
+                                        return;
+                                    }
+                                }
+                                set_status(&app, &status);
+                            }
+                            Err(error) => {
+                                if let Some(capture) = capture.upgrade() {
+                                    capture.set_ocr_busy(false);
+                                    capture.set_ocr_status(error.clone().into());
+                                }
+                                set_status(&app, &error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let status = format!("OCR 失败：{error}");
+                        if let Some(capture) = capture.upgrade() {
+                            capture.set_ocr_busy(false);
+                            capture.set_ocr_status(status.clone().into());
+                        }
+                        set_status(&app, &status);
+                    }
+                });
+            },
+        ) {
+            capture.set_ocr_busy(false);
+            capture.set_ocr_status(error.clone().into());
+            set_status(&app_weak, &error);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let copy_session = Arc::clone(&session);
+    capture.on_ocr_copy_requested(move || {
+        let text = copy_session
+            .annotation
+            .lock()
+            .ok()
+            .and_then(|annotation| {
+                annotation
+                    .as_ref()
+                    .map(|annotation| annotation.document.ocr_plain_text())
+            })
+            .unwrap_or_default();
+        let status = if text.trim().is_empty() {
+            "当前没有可复制的 OCR 文本。".to_string()
+        } else {
+            match snow_shot_clipboard::write_text(text.as_str()) {
+                Ok(()) => "已复制 OCR 文本到剪贴板。".to_string(),
+                Err(error) => format!("复制 OCR 文本失败：{error}"),
+            }
+        };
+        set_status(&app_weak, &status);
+    });
+
+    let app_weak = app.as_weak();
+    let annotation_capture = capture.as_weak();
+    let annotation_session = Arc::clone(&session);
+    capture.on_annotation_tool_requested(move |tool, left, top, right, bottom| {
+        let resolved_tool = if tool == -1 {
+            annotation_session
+                .annotation
+                .lock()
+                .ok()
+                .and_then(|annotation| {
+                    annotation
+                        .as_ref()
+                        .map(|annotation| annotation.previous_tool)
+                })
+                .unwrap_or(0)
+        } else {
+            tool
+        };
+        let result =
+            selection_region(&annotation_session, left, top, right, bottom).and_then(|region| {
+                ensure_annotation_state(&annotation_session, region, resolved_tool).map(Some)
+            });
+
+        match result {
+            Ok(Some(snapshot)) => {
+                if let Some(capture) = annotation_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Ok(None) => {
+                if let Some(capture) = annotation_capture.upgrade() {
+                    capture.set_annotation_tool(0);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let floating_session = Arc::clone(&session);
+    capture.on_floating_position_changed(move |panel, x, y| {
+        if let Ok(mut positions) = floating_session.floating_panels.lock() {
+            let position = Some(FloatPoint {
+                x: x.max(0.0),
+                y: y.max(0.0),
+            });
+            match panel {
+                0 => positions.toolbar = position,
+                1 => positions.properties = position,
+                _ => {}
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let annotation_capture = capture.as_weak();
+    let annotation_session = Arc::clone(&session);
+    capture.on_annotation_pointer_event(
+        move |phase, normalized_x, normalized_y, preserve_aspect, centered| {
+            let active_color_slot = annotation_capture
+                .upgrade()
+                .map(|capture| capture.get_active_color_slot())
+                .unwrap_or(0);
+            let frame_origin = annotation_session
+                .frame
+                .lock()
+                .ok()
+                .and_then(|frame| {
+                    frame
+                        .as_ref()
+                        .map(|frame| (frame.origin_x(), frame.origin_y()))
+                })
+                .unwrap_or((0, 0));
+            let result = annotation_session
+                .annotation
+                .lock()
+                .map_err(|_| "标注会话状态不可用。".to_string())
+                .and_then(|mut guard| {
+                    let annotation = guard
+                        .as_mut()
+                        .ok_or_else(|| "请先选择一个标注工具。".to_string())?;
+                    let point = Point::new(
+                        normalized_x.clamp(0.0, 1.0) * annotation.document.width() as f32,
+                        normalized_y.clamp(0.0, 1.0) * annotation.document.height() as f32,
+                    );
+
+                    if annotation.tool == 7 {
+                        if phase == 0 {
+                            annotation.color = annotation.document.sample_original(point);
+                            let patch = match active_color_slot {
+                                1 => {
+                                    annotation.style.fill = annotation.color;
+                                    StylePatch {
+                                        fill: Some(annotation.color),
+                                        ..StylePatch::default()
+                                    }
+                                }
+                                2 => {
+                                    annotation.style.text = annotation.color;
+                                    StylePatch {
+                                        text: Some(annotation.color),
+                                        ..StylePatch::default()
+                                    }
+                                }
+                                _ => {
+                                    annotation.style.stroke = annotation.color;
+                                    StylePatch {
+                                        stroke: Some(annotation.color),
+                                        ..StylePatch::default()
+                                    }
+                                }
+                            };
+                            if annotation.document.selected_ocr_id().is_some() {
+                                let mut style = annotation.document.ocr_style().clone();
+                                style.manual_text_color = Some(annotation.color);
+                                annotation.document.set_ocr_style(style);
+                            } else {
+                                annotation.document.update_selected_style(&patch);
+                            }
+                            if let Ok(mut sample) = annotation_session.sampled_color.lock() {
+                                *sample = Some(SampledColor {
+                                    color: annotation.color,
+                                    x: frame_origin
+                                        .0
+                                        .saturating_add(annotation.region.x() as i32)
+                                        .saturating_add(point.x.round() as i32),
+                                    y: frame_origin
+                                        .1
+                                        .saturating_add(annotation.region.y() as i32)
+                                        .saturating_add(point.y.round() as i32),
+                                });
+                            }
+                        }
+                        return Ok(annotation_snapshot(annotation));
+                    }
+
+                    let tool = annotation_tool(annotation.tool)
+                        .ok_or_else(|| "当前标注工具不可用。".to_string())?;
+                    match phase {
+                        0 => annotation.document.begin_with_style(
+                            tool,
+                            point,
+                            annotation.style.clone(),
+                            preserve_aspect,
+                            centered,
+                        ),
+                        1 => annotation.document.update_with_modifiers(
+                            point,
+                            preserve_aspect,
+                            centered,
+                        ),
+                        2 => {
+                            annotation.document.commit_with_modifiers(
+                                point,
+                                preserve_aspect,
+                                centered,
+                            );
+                        }
+                        3 => annotation.document.cancel_active(),
+                        _ => {}
+                    }
+                    Ok(annotation_snapshot(annotation))
+                });
+
+            match result {
+                Ok(snapshot) => {
+                    if phase == 0 {
+                        let picked =
+                            annotation_session
+                                .annotation
+                                .lock()
+                                .ok()
+                                .and_then(|annotation| {
+                                    annotation.as_ref().and_then(|annotation| {
+                                        (annotation.tool == 7).then(|| {
+                                            let persist = if annotation
+                                                .document
+                                                .selected_ocr_id()
+                                                .is_some()
+                                            {
+                                                PersistedAnnotationStyle::Ocr(
+                                                    annotation.document.ocr_style().clone(),
+                                                )
+                                            } else {
+                                                PersistedAnnotationStyle::Tool(
+                                                    annotation.previous_tool,
+                                                    annotation.style.clone(),
+                                                )
+                                            };
+                                            (annotation.color, persist)
+                                        })
+                                    })
+                                });
+                        if let Some((color, persist)) = picked {
+                            let _ = persist_annotation_style(&annotation_session, Some(persist));
+                            let format = annotation_session.color_format.load(Ordering::Acquire);
+                            let sample = SampledColor { color, x: 0, y: 0 };
+                            let value = format_color_value(sample.color, format);
+                            let _ = snow_shot_clipboard::write_text(&value);
+                        }
+                    }
+                    if phase == 2 {
+                        let next_serial =
+                            annotation_session
+                                .annotation
+                                .lock()
+                                .ok()
+                                .and_then(|annotation| {
+                                    annotation.as_ref().and_then(|annotation| {
+                                        (annotation.tool == 4)
+                                            .then(|| annotation.document.next_serial_number())
+                                    })
+                                });
+                        if let Some(next_serial) = next_serial
+                            && let Ok(mut settings) = annotation_session.settings.lock()
+                        {
+                            settings.set_serial_number(next_serial);
+                            let _ = settings.save();
+                        }
+                    }
+                    if let Some(capture) = annotation_capture.upgrade()
+                        && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                    {
+                        set_status(&app_weak, &error);
+                    }
+                }
+                Err(error) => set_status(&app_weak, &error),
+            }
+        },
+    );
+
+    let app_weak = app.as_weak();
+    let annotation_capture = capture.as_weak();
+    let annotation_session = Arc::clone(&session);
+    capture.on_annotation_undo_requested(move || {
+        let result = annotation_session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())
+            .and_then(|mut guard| {
+                let annotation = guard
+                    .as_mut()
+                    .ok_or_else(|| "当前没有可撤销的标注。".to_string())?;
+                annotation.document.undo();
+                Ok(annotation_snapshot(annotation))
+            });
+        match result {
+            Ok(snapshot) => {
+                if let Some(capture) = annotation_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let annotation_capture = capture.as_weak();
+    let annotation_session = Arc::clone(&session);
+    capture.on_annotation_redo_requested(move || {
+        let result = annotation_session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())
+            .and_then(|mut guard| {
+                let annotation = guard
+                    .as_mut()
+                    .ok_or_else(|| "当前没有可重做的标注。".to_string())?;
+                annotation.document.redo();
+                Ok(annotation_snapshot(annotation))
+            });
+        match result {
+            Ok(snapshot) => {
+                if let Some(capture) = annotation_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let annotation_capture = capture.as_weak();
+    let annotation_session = Arc::clone(&session);
+    capture.on_annotation_reset_requested(move || {
+        if let Ok(mut annotation) = annotation_session.annotation.lock() {
+            annotation.take();
+        }
+        if let Some(capture) = annotation_capture.upgrade() {
+            clear_annotation_ui(&capture);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let style_capture = capture.as_weak();
+    let style_session = Arc::clone(&session);
+    capture.on_annotation_color_requested(move |slot, value| {
+        match update_annotation_color(&style_session, slot, value.as_str()) {
+            Ok(snapshot) => {
+                if let Some(capture) = style_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let alpha_capture = capture.as_weak();
+    let alpha_session = Arc::clone(&session);
+    capture.on_annotation_color_alpha_requested(move |slot, value| {
+        match update_annotation_color_alpha(&alpha_session, slot, value) {
+            Ok(snapshot) => {
+                if let Some(capture) = alpha_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let style_capture = capture.as_weak();
+    let style_session = Arc::clone(&session);
+    capture.on_annotation_style_value_requested(move |field, value| {
+        match update_annotation_style_value(&style_session, field, value) {
+            Ok(snapshot) => {
+                if let Some(capture) = style_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let text_capture = capture.as_weak();
+    let text_session = Arc::clone(&session);
+    capture.on_annotation_text_requested(move |text| {
+        match update_annotation_text(&text_session, text.to_string()) {
+            Ok(snapshot) => {
+                if let Some(capture) = text_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let layer_capture = capture.as_weak();
+    let layer_session = Arc::clone(&session);
+    capture.on_annotation_layer_requested(move |command| {
+        match update_annotation_layer(&layer_session, command) {
+            Ok(snapshot) => {
+                if let Some(capture) = layer_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let delete_capture = capture.as_weak();
+    let delete_session = Arc::clone(&session);
+    capture.on_annotation_delete_requested(move || {
+        match delete_selected_annotation(&delete_session) {
+            Ok(snapshot) => {
+                if let Some(capture) = delete_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let visibility_capture = capture.as_weak();
+    let visibility_session = Arc::clone(&session);
+    capture.on_ocr_visibility_requested(move |visible| {
+        let result = visibility_session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())
+            .and_then(|mut annotation| {
+                let annotation = annotation
+                    .as_mut()
+                    .ok_or_else(|| "当前没有 OCR 图层。".to_string())?;
+                annotation.document.set_ocr_visible(visible);
+                Ok((
+                    annotation_snapshot(annotation),
+                    annotation.document.ocr_style().clone(),
+                ))
+            });
+        match result {
+            Ok((snapshot, style)) => {
+                if let Err(error) = persist_annotation_style(
+                    &visibility_session,
+                    Some(PersistedAnnotationStyle::Ocr(style)),
+                ) {
+                    set_status(&app_weak, &error);
+                }
+                if let Some(capture) = visibility_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let auto_color_capture = capture.as_weak();
+    let auto_color_session = Arc::clone(&session);
+    capture.on_ocr_auto_color_requested(move || {
+        let result = auto_color_session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())
+            .and_then(|mut annotation| {
+                let annotation = annotation
+                    .as_mut()
+                    .ok_or_else(|| "当前没有 OCR 图层。".to_string())?;
+                let mut style = annotation.document.ocr_style().clone();
+                style.manual_text_color = None;
+                annotation.document.set_ocr_style(style.clone());
+                Ok((annotation_snapshot(annotation), style))
+            });
+        match result {
+            Ok((snapshot, style)) => {
+                if let Err(error) = persist_annotation_style(
+                    &auto_color_session,
+                    Some(PersistedAnnotationStyle::Ocr(style)),
+                ) {
+                    set_status(&app_weak, &error);
+                }
+                if let Some(capture) = auto_color_capture.upgrade()
+                    && let Err(error) = apply_annotation_snapshot(&capture, snapshot)
+                {
+                    set_status(&app_weak, &error);
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let context_capture_window = capture_window.clone();
+    let context_session = Arc::clone(&session);
+    capture.on_context_copy_requested(move |force_image, left, top, right, bottom| {
+        if !force_image {
+            let selected_text = context_session
+                .annotation
+                .lock()
+                .ok()
+                .and_then(|annotation| {
+                    annotation.as_ref().and_then(|annotation| {
+                        annotation
+                            .document
+                            .selected_ocr_text()
+                            .map(ToOwned::to_owned)
+                    })
+                });
+            if let Some(text) = selected_text {
+                let status = match snow_shot_clipboard::write_text(&text) {
+                    Ok(()) => "已复制所选 OCR 文字。".to_string(),
+                    Err(error) => format!("复制 OCR 文字失败：{error}"),
+                };
+                set_status(&app_weak, &status);
+                return;
+            }
+        }
+        let result = selection_region(&context_session, left, top, right, bottom)
+            .and_then(|region| selected_region_frame(&context_session, region))
+            .and_then(|frame| {
+                copy_region_frame_to_clipboard(&frame).map_err(|error| error.to_string())
+            });
+        finish_region_capture(
+            app_weak.clone(),
+            context_capture_window.clone(),
+            Arc::clone(&context_session),
+            match result {
+                Ok(summary) => format!(
+                    "已复制 {}×{} 区域截图到剪贴板。",
+                    summary.width(),
+                    summary.height()
+                ),
+                Err(error) => error,
+            },
+        );
+    });
+
+    let app_weak = app.as_weak();
+    let sample_capture = capture.as_weak();
+    let sample_session = Arc::clone(&session);
+    capture.on_cursor_sample_requested(move |x, y, canvas_width, canvas_height| {
+        let result = magnifier_snapshot(&sample_session, x, y, canvas_width, canvas_height);
+        match result {
+            Ok((pixels, sample, label)) => {
+                if let Ok(mut current) = sample_session.sampled_color.lock() {
+                    *current = Some(sample);
+                }
+                if let Some(capture) = sample_capture.upgrade() {
+                    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(17, 17);
+                    buffer.make_mut_bytes().copy_from_slice(&pixels);
+                    capture.set_magnifier_frame(Image::from_rgba8(buffer));
+                    capture.set_magnifier_label(label.into());
+                    capture.set_magnifier_visible(true);
+                    capture.set_color_format(
+                        sample_session.color_format.load(Ordering::Acquire) as i32
+                    );
+                }
+            }
+            Err(error) => set_status(&app_weak, &error),
+        }
+    });
+
+    let format_capture = capture.as_weak();
+    let format_session = Arc::clone(&session);
+    capture.on_color_format_cycle_requested(move || {
+        let next = (format_session.color_format.load(Ordering::Acquire) + 1) % 5;
+        format_session.color_format.store(next, Ordering::Release);
+        if let Some(capture) = format_capture.upgrade() {
+            capture.set_color_format(next as i32);
+            if let Ok(sample) = format_session.sampled_color.lock()
+                && let Some(sample) = *sample
+            {
+                capture.set_magnifier_label(format_sample(sample, next).into());
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let copy_color_session = Arc::clone(&session);
+    capture.on_color_copy_requested(move || {
+        let sample = copy_color_session
+            .sampled_color
+            .lock()
+            .ok()
+            .and_then(|sample| *sample);
+        let status = match sample {
+            Some(sample) => {
+                let format = copy_color_session.color_format.load(Ordering::Acquire);
+                let value = format_color_value(sample.color, format);
+                match snow_shot_clipboard::write_text(&value) {
+                    Ok(()) => format!("已复制色值 {value}。"),
+                    Err(error) => format!("复制色值失败：{error}"),
+                }
+            }
+            None => "当前没有可复制的取色结果。".to_string(),
+        };
+        set_status(&app_weak, &status);
+    });
+
+    capture.on_cursor_nudge_requested(move |delta_x, delta_y| {
+        let mut point = POINT::default();
+        // SAFETY: GetCursorPos and SetCursorPos operate on the process desktop cursor.
+        if unsafe { GetCursorPos(&mut point) }.is_ok() {
+            let _ = unsafe {
+                SetCursorPos(
+                    point.x.saturating_add(delta_x),
+                    point.y.saturating_add(delta_y),
+                )
+            };
         }
     });
 
@@ -651,6 +1492,7 @@ fn bind_capture_ready_callback(
     capture_window: SharedCaptureWindow,
     session: SharedCaptureSession,
     pins: SharedPins,
+    ocr: SharedOcrContext,
 ) {
     let app_weak = app.as_weak();
     app.on_capture_ready(move || {
@@ -665,6 +1507,7 @@ fn bind_capture_ready_callback(
             &capture_window,
             Arc::clone(&session),
             Rc::clone(&pins),
+            Rc::clone(&ocr),
             None,
         ) {
             Ok(()) => app.set_runtime_status("正在准备区域截图窗口…".into()),
@@ -683,17 +1526,35 @@ fn create_capture_window(
     capture_window: &SharedCaptureWindow,
     session: SharedCaptureSession,
     pins: SharedPins,
+    ocr: SharedOcrContext,
     selection: Option<FloatRect>,
 ) -> Result<(), String> {
     capture_window.borrow_mut().take();
 
     let capture = CaptureWindow::new().map_err(|error| format!("无法创建区域截图窗口：{error}"))?;
+    if let Ok(settings) = session.settings.lock() {
+        capture.set_last_shape(settings.last_shape);
+        capture.set_last_line(settings.last_line);
+        capture.set_last_pen(settings.last_pen);
+        capture.set_last_privacy(settings.last_privacy);
+    }
+    if let Ok(positions) = session.floating_panels.lock() {
+        if let Some(position) = positions.toolbar {
+            capture.set_toolbar_position_x(position.x);
+            capture.set_toolbar_position_y(position.y);
+        }
+        if let Some(position) = positions.properties {
+            capture.set_property_position_x(position.x);
+            capture.set_property_position_y(position.y);
+        }
+    }
     bind_capture_callbacks(
         app,
         &capture,
         Rc::downgrade(capture_window),
         Arc::clone(&session),
         pins,
+        ocr,
     );
 
     let (origin_x, origin_y) = {
@@ -705,6 +1566,7 @@ fn create_capture_window(
             .as_ref()
             .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
         prepare_frozen_frame(&capture, frame)?;
+        restore_annotation_ui(&capture, &session)?;
         (frame.origin_x(), frame.origin_y())
     };
     capture
@@ -771,7 +1633,10 @@ fn bind_app_callbacks(app: &AppWindow, session: SharedCaptureSession) {
 
     let app_weak = app.as_weak();
     app.on_ocr_config_clicked(move || {
-        set_status(&app_weak, "OCR Core 已保留，原生配置页将在截图闭环后接入。");
+        set_status(
+            &app_weak,
+            "选区工具栏已接入本地 PP-OCRv4；首次识别会自动安装官方模型。",
+        );
     });
 }
 
@@ -1157,6 +2022,725 @@ fn normalized_region(
 
     PixelRect::new(x, y, max_x.saturating_sub(x), max_y.saturating_sub(y))
         .map_err(CaptureWorkflowError::Capture)
+}
+
+fn selection_region(
+    session: &CaptureSession,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> Result<PixelRect, String> {
+    let frame = session
+        .frame
+        .lock()
+        .map_err(|_| "截图会话状态不可用。".to_string())?;
+    let frame = frame
+        .as_ref()
+        .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+    normalized_region(frame, left, top, right, bottom).map_err(|error| error.to_string())
+}
+
+fn selected_region_frame(
+    session: &CaptureSession,
+    region: PixelRect,
+) -> Result<FrozenRegionFrame, String> {
+    if let Ok(annotation) = session.annotation.lock()
+        && let Some(annotation) = annotation.as_ref()
+        && annotation.region == region
+    {
+        return FrozenRegionFrame::from_rgba(
+            annotation.document.width(),
+            annotation.document.height(),
+            annotation.document.pixels().to_vec(),
+        )
+        .map_err(|error| error.to_string());
+    }
+
+    let frame = session
+        .frame
+        .lock()
+        .map_err(|_| "截图会话状态不可用。".to_string())?;
+    let frame = frame
+        .as_ref()
+        .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+    extract_frozen_region(frame, region).map_err(|error| error.to_string())
+}
+
+fn ocr_blocks_from_result(result: OcrDetectResult) -> Vec<OcrBlock> {
+    let scale = result.scale_factor.max(f32::MIN_POSITIVE);
+    result
+        .text_blocks
+        .into_iter()
+        .filter_map(|block| {
+            let [first, second, third, fourth] = block.box_points.as_slice() else {
+                return None;
+            };
+            Some(OcrBlock {
+                id: snow_shot_annotate::ElementId(0),
+                points: [
+                    Point::new(first.x as f32 / scale, first.y as f32 / scale),
+                    Point::new(second.x as f32 / scale, second.y as f32 / scale),
+                    Point::new(third.x as f32 / scale, third.y as f32 / scale),
+                    Point::new(fourth.x as f32 / scale, fourth.y as f32 / scale),
+                ],
+                text: block.text,
+                box_score: block.box_score,
+                text_score: block.text_score,
+            })
+        })
+        .collect()
+}
+
+fn magnifier_snapshot(
+    session: &CaptureSession,
+    x: f32,
+    y: f32,
+    canvas_width: f32,
+    canvas_height: f32,
+) -> Result<(Vec<u8>, SampledColor, String), String> {
+    let frame = session
+        .frame
+        .lock()
+        .map_err(|_| "截图会话状态不可用。".to_string())?;
+    let frame = frame
+        .as_ref()
+        .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+    let (center_x, center_y) = map_canvas_point_to_frame(
+        x,
+        y,
+        canvas_width,
+        canvas_height,
+        frame.width(),
+        frame.height(),
+    )
+    .ok_or_else(|| "取色画布尺寸无效。".to_string())?;
+    let mut pixels = vec![0_u8; 17 * 17 * 4];
+    for target_y in 0..17_u32 {
+        for target_x in 0..17_u32 {
+            let source_x =
+                (center_x as i32 + target_x as i32 - 8).clamp(0, frame.width() as i32 - 1) as u32;
+            let source_y =
+                (center_y as i32 + target_y as i32 - 8).clamp(0, frame.height() as i32 - 1) as u32;
+            let source_index =
+                ((source_y as usize * frame.width() as usize) + source_x as usize) * 4;
+            let target_index = ((target_y as usize * 17) + target_x as usize) * 4;
+            pixels[target_index..target_index + 4]
+                .copy_from_slice(&frame.rgba()[source_index..source_index + 4]);
+        }
+    }
+    let center_index = ((center_y as usize * frame.width() as usize) + center_x as usize) * 4;
+    let sample = SampledColor {
+        color: RgbaColor::new(
+            frame.rgba()[center_index],
+            frame.rgba()[center_index + 1],
+            frame.rgba()[center_index + 2],
+            frame.rgba()[center_index + 3],
+        ),
+        x: frame.origin_x().saturating_add(center_x as i32),
+        y: frame.origin_y().saturating_add(center_y as i32),
+    };
+    let format = session.color_format.load(Ordering::Acquire);
+    let label = format_sample(sample, format);
+    Ok((pixels, sample, label))
+}
+
+fn map_canvas_point_to_frame(
+    x: f32,
+    y: f32,
+    canvas_width: f32,
+    canvas_height: f32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<(u32, u32)> {
+    if canvas_width <= 0.0 || canvas_height <= 0.0 || frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+    Some((
+        ((x / canvas_width).clamp(0.0, 1.0) * frame_width.saturating_sub(1) as f32).round() as u32,
+        ((y / canvas_height).clamp(0.0, 1.0) * frame_height.saturating_sub(1) as f32).round()
+            as u32,
+    ))
+}
+
+fn format_sample(sample: SampledColor, format: u8) -> String {
+    let value = format_color_value(sample.color, format);
+    format!("({}, {})  {value}", sample.x, sample.y)
+}
+
+fn format_color_value(color: RgbaColor, format: u8) -> String {
+    match format % 5 {
+        0 => color.display_hex(),
+        1 => color.format_rgb(),
+        2 => color.format_hsv(),
+        3 => color.format_hsl(),
+        _ => color.format_cmyk(),
+    }
+}
+
+fn ensure_annotation_state(
+    session: &CaptureSession,
+    region: PixelRect,
+    tool: i32,
+) -> Result<AnnotationUiSnapshot, String> {
+    let selected_tool = annotation_tool(tool).unwrap_or(AnnotationTool::Select);
+    let (style, ocr_style, serial_number) = {
+        let mut settings = session
+            .settings
+            .lock()
+            .map_err(|_| "Native 样式设置不可用。".to_string())?;
+        settings.remember_tool(tool);
+        let style = settings.style(selected_tool);
+        let ocr_style = settings.ocr_style.clone();
+        let serial_number = settings.serial_number;
+        let _ = settings.save();
+        (style, ocr_style, serial_number)
+    };
+    if let Ok(mut annotation) = session.annotation.lock()
+        && let Some(annotation) = annotation.as_mut()
+        && annotation.region == region
+    {
+        let previous_tool = annotation.tool;
+        if tool == 7 && previous_tool != 7 {
+            annotation.previous_tool = previous_tool;
+        } else if tool != 7 {
+            annotation.previous_tool = tool;
+        }
+        annotation.tool = tool;
+        annotation.style = style;
+        annotation.color = annotation.style.stroke;
+        annotation.stroke_width = annotation.style.stroke_width;
+        return Ok(annotation_snapshot(annotation));
+    }
+
+    let selected = {
+        let frame = session
+            .frame
+            .lock()
+            .map_err(|_| "截图会话状态不可用。".to_string())?;
+        let frame = frame
+            .as_ref()
+            .ok_or_else(|| format!("截图会话已结束，请重新按 {SCREENSHOT_SHORTCUT}。"))?;
+        extract_frozen_region(frame, region).map_err(|error| error.to_string())?
+    };
+    let mut document = AnnotationDocument::new(
+        selected.width(),
+        selected.height(),
+        selected.rgba().to_vec(),
+    )
+    .map_err(|error| error.to_string())?;
+    document.configure_ocr_style(ocr_style);
+    document.configure_next_serial_number(serial_number);
+    let annotation = AnnotationState {
+        region,
+        document,
+        tool,
+        previous_tool: if tool == 7 { 0 } else { tool },
+        color: style.stroke,
+        stroke_width: style.stroke_width,
+        style,
+    };
+    let snapshot = annotation_snapshot(&annotation);
+    let mut current = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?;
+    *current = Some(annotation);
+    Ok(snapshot)
+}
+
+fn annotation_tool(tool: i32) -> Option<AnnotationTool> {
+    match tool {
+        0 => Some(AnnotationTool::Select),
+        1 => Some(AnnotationTool::Pen),
+        2 => Some(AnnotationTool::Line),
+        3 => Some(AnnotationTool::Arrow),
+        4 => Some(AnnotationTool::SerialNumber),
+        5 => Some(AnnotationTool::Mosaic),
+        6 => Some(AnnotationTool::Blur),
+        8 => Some(AnnotationTool::Rectangle),
+        9 => Some(AnnotationTool::Ellipse),
+        10 => Some(AnnotationTool::Highlighter),
+        11 => Some(AnnotationTool::Eraser),
+        12 => Some(AnnotationTool::Diamond),
+        13 => Some(AnnotationTool::Text),
+        _ => None,
+    }
+}
+
+const fn annotation_tool_id(tool: AnnotationTool) -> i32 {
+    match tool {
+        AnnotationTool::Select => 0,
+        AnnotationTool::Pen => 1,
+        AnnotationTool::Line => 2,
+        AnnotationTool::Arrow => 3,
+        AnnotationTool::SerialNumber => 4,
+        AnnotationTool::Mosaic => 5,
+        AnnotationTool::Blur => 6,
+        AnnotationTool::Rectangle => 8,
+        AnnotationTool::Ellipse => 9,
+        AnnotationTool::Highlighter => 10,
+        AnnotationTool::Eraser => 11,
+        AnnotationTool::Diamond => 12,
+        AnnotationTool::Text => 13,
+    }
+}
+
+fn update_annotation_color(
+    session: &CaptureSession,
+    slot: i32,
+    value: &str,
+) -> Result<AnnotationUiSnapshot, String> {
+    let color = RgbaColor::parse(value)?;
+    let (snapshot, persist) = {
+        let mut annotation = session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())?;
+        let annotation = annotation
+            .as_mut()
+            .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
+        if annotation.document.selected_ocr_id().is_some() {
+            let mut style = annotation.document.ocr_style().clone();
+            style.manual_text_color = Some(color);
+            annotation.document.set_ocr_style(style.clone());
+            (
+                annotation_snapshot(annotation),
+                Some(PersistedAnnotationStyle::Ocr(style)),
+            )
+        } else {
+            let patch = match slot {
+                0 => StylePatch {
+                    stroke: Some(color),
+                    ..StylePatch::default()
+                },
+                1 => StylePatch {
+                    fill: Some(color),
+                    ..StylePatch::default()
+                },
+                2 => StylePatch {
+                    text: Some(color),
+                    ..StylePatch::default()
+                },
+                _ => return Err("未知的颜色属性。".to_string()),
+            };
+            let persist = if annotation.document.selected_id().is_some() {
+                annotation.document.update_selected_style(&patch);
+                None
+            } else {
+                match slot {
+                    0 => annotation.style.stroke = color,
+                    1 => annotation.style.fill = color,
+                    2 => annotation.style.text = color,
+                    _ => {}
+                }
+                annotation.color = annotation.style.stroke;
+                Some(PersistedAnnotationStyle::Tool(
+                    annotation.tool,
+                    annotation.style.clone(),
+                ))
+            };
+            (annotation_snapshot(annotation), persist)
+        }
+    };
+    persist_annotation_style(session, persist)?;
+    Ok(snapshot)
+}
+
+fn update_annotation_color_alpha(
+    session: &CaptureSession,
+    slot: i32,
+    alpha_percent: f32,
+) -> Result<AnnotationUiSnapshot, String> {
+    let mut color = {
+        let annotation = session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())?;
+        let annotation = annotation
+            .as_ref()
+            .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
+        if annotation.document.selected_ocr_id().is_some() {
+            annotation
+                .document
+                .ocr_style()
+                .manual_text_color
+                .unwrap_or(annotation.style.text)
+        } else {
+            let style = annotation
+                .document
+                .selected_style()
+                .unwrap_or(&annotation.style);
+            match slot {
+                0 => style.stroke,
+                1 => style.fill,
+                2 => style.text,
+                _ => return Err("未知的颜色属性。".to_string()),
+            }
+        }
+    };
+    color.alpha = (alpha_percent.clamp(0.0, 100.0) * 2.55).round() as u8;
+    update_annotation_color(session, slot, &color.display_hex())
+}
+
+enum PersistedAnnotationStyle {
+    Tool(i32, ElementStyle),
+    Ocr(OcrLayerStyle),
+    Serial(u32),
+}
+
+fn persist_annotation_style(
+    session: &CaptureSession,
+    persist: Option<PersistedAnnotationStyle>,
+) -> Result<(), String> {
+    let Some(persist) = persist else {
+        return Ok(());
+    };
+    let mut settings = session
+        .settings
+        .lock()
+        .map_err(|_| "Native 样式设置不可用。".to_string())?;
+    match persist {
+        PersistedAnnotationStyle::Tool(tool_id, style) => {
+            if let Some(tool) = annotation_tool(tool_id) {
+                settings.set_style(tool, style);
+            }
+        }
+        PersistedAnnotationStyle::Ocr(style) => settings.set_ocr_style(style),
+        PersistedAnnotationStyle::Serial(number) => settings.set_serial_number(number),
+    }
+    settings.save()
+}
+
+fn update_annotation_style_value(
+    session: &CaptureSession,
+    field: i32,
+    value: f32,
+) -> Result<AnnotationUiSnapshot, String> {
+    let (snapshot, persist) = {
+        let mut annotation = session
+            .annotation
+            .lock()
+            .map_err(|_| "标注会话状态不可用。".to_string())?;
+        let annotation = annotation
+            .as_mut()
+            .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
+        if annotation.document.selected_ocr_id().is_some() {
+            let mut style = annotation.document.ocr_style().clone();
+            match field {
+                1 => style.opacity = (value / 100.0).clamp(0.0, 1.0),
+                3 => style.blur_strength = (value / 55.0).clamp(0.2, 3.0),
+                _ => return Err("该属性不适用于 OCR 图层。".to_string()),
+            }
+            annotation.document.set_ocr_style(style.clone());
+            (
+                annotation_snapshot(annotation),
+                Some(PersistedAnnotationStyle::Ocr(style)),
+            )
+        } else if field == 7 {
+            let number = value.round().max(1.0) as u32;
+            annotation.document.update_serial_number(number);
+            (
+                annotation_snapshot(annotation),
+                Some(PersistedAnnotationStyle::Serial(number)),
+            )
+        } else {
+            let patch = match field {
+                0 => StylePatch {
+                    stroke_width: Some(value),
+                    ..StylePatch::default()
+                },
+                1 => StylePatch {
+                    opacity: Some(value / 100.0),
+                    ..StylePatch::default()
+                },
+                2 => StylePatch {
+                    brush_size: Some(value),
+                    ..StylePatch::default()
+                },
+                3 => StylePatch {
+                    effect_strength: Some(value / 100.0),
+                    ..StylePatch::default()
+                },
+                4 => StylePatch {
+                    font_size: Some(value),
+                    ..StylePatch::default()
+                },
+                5 => StylePatch {
+                    bold: Some(value >= 0.5),
+                    ..StylePatch::default()
+                },
+                6 => StylePatch {
+                    alignment: Some(match value.round() as i32 {
+                        1 => TextAlignment::Center,
+                        2 => TextAlignment::Right,
+                        _ => TextAlignment::Left,
+                    }),
+                    ..StylePatch::default()
+                },
+                _ => return Err("未知的样式属性。".to_string()),
+            };
+            let persist = if annotation.document.selected_id().is_some() {
+                annotation.document.update_selected_style(&patch);
+                None
+            } else {
+                match field {
+                    0 => annotation.style.stroke_width = value.clamp(1.0, 64.0),
+                    1 => annotation.style.opacity = (value / 100.0).clamp(0.0, 1.0),
+                    2 => annotation.style.brush_size = value.clamp(2.0, 256.0),
+                    3 => annotation.style.effect_strength = (value / 100.0).clamp(0.05, 1.0),
+                    4 => annotation.style.font_size = value.clamp(8.0, 160.0),
+                    5 => annotation.style.bold = value >= 0.5,
+                    6 => {
+                        annotation.style.alignment = match value.round() as i32 {
+                            1 => TextAlignment::Center,
+                            2 => TextAlignment::Right,
+                            _ => TextAlignment::Left,
+                        }
+                    }
+                    _ => {}
+                }
+                annotation.stroke_width = annotation.style.stroke_width;
+                Some(PersistedAnnotationStyle::Tool(
+                    annotation.tool,
+                    annotation.style.clone(),
+                ))
+            };
+            (annotation_snapshot(annotation), persist)
+        }
+    };
+    persist_annotation_style(session, persist)?;
+    Ok(snapshot)
+}
+
+fn update_annotation_text(
+    session: &CaptureSession,
+    text: String,
+) -> Result<AnnotationUiSnapshot, String> {
+    let mut annotation = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?;
+    let annotation = annotation
+        .as_mut()
+        .ok_or_else(|| "当前没有文本标注。".to_string())?;
+    if !annotation.document.update_selected_text(text) {
+        return Err("请先选择文本标注。".to_string());
+    }
+    Ok(annotation_snapshot(annotation))
+}
+
+fn update_annotation_layer(
+    session: &CaptureSession,
+    command: i32,
+) -> Result<AnnotationUiSnapshot, String> {
+    let command = match command {
+        0 => LayerCommand::Back,
+        1 => LayerCommand::Backward,
+        2 => LayerCommand::Forward,
+        3 => LayerCommand::Front,
+        _ => return Err("未知的图层操作。".to_string()),
+    };
+    let mut annotation = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?;
+    let annotation = annotation
+        .as_mut()
+        .ok_or_else(|| "当前没有可调整的元素。".to_string())?;
+    annotation.document.apply_layer_command(command);
+    Ok(annotation_snapshot(annotation))
+}
+
+fn delete_selected_annotation(session: &CaptureSession) -> Result<AnnotationUiSnapshot, String> {
+    let mut annotation = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?;
+    let annotation = annotation
+        .as_mut()
+        .ok_or_else(|| "当前没有可删除的元素。".to_string())?;
+    if !annotation.document.delete_selected() {
+        return Err("请先选择一个标注元素。".to_string());
+    }
+    Ok(annotation_snapshot(annotation))
+}
+
+fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
+    let selected_ocr = annotation.document.selected_ocr_id().is_some();
+    let mut style = annotation
+        .document
+        .selected_style()
+        .cloned()
+        .unwrap_or_else(|| annotation.style.clone());
+    if selected_ocr {
+        let ocr_style = annotation.document.ocr_style();
+        if let Some(color) = ocr_style.manual_text_color {
+            style.text = color;
+        }
+        style.opacity = ocr_style.opacity;
+        style.effect_strength = ocr_style.blur_strength;
+    }
+    AnnotationUiSnapshot {
+        width: annotation.document.width(),
+        height: annotation.document.height(),
+        pixels: annotation.document.preview_pixels().to_vec(),
+        tool: annotation.tool,
+        can_undo: annotation.document.can_undo(),
+        can_redo: annotation.document.can_redo(),
+        color: annotation.color,
+        color_label: annotation.color.display_hex(),
+        selected_ocr_text: annotation
+            .document
+            .selected_ocr_text()
+            .unwrap_or_default()
+            .to_string(),
+        ocr_manual_color: annotation.document.ocr_style().manual_text_color.is_some(),
+        ocr_text: annotation.document.ocr_plain_text(),
+        ocr_visible: annotation.document.ocr_style().visible
+            && !annotation.document.ocr_blocks().is_empty(),
+        stroke_color: style.stroke,
+        fill_color: style.fill,
+        text_color: style.text,
+        stroke_hex: style.stroke.display_hex(),
+        fill_hex: style.fill.display_hex(),
+        text_hex: style.text.display_hex(),
+        stroke_width: style.stroke_width,
+        opacity_percent: style.opacity * 100.0,
+        brush_size: style.brush_size,
+        effect_percent: if selected_ocr {
+            style.effect_strength * 55.0
+        } else {
+            style.effect_strength * 100.0
+        },
+        font_size: style.font_size,
+        bold: style.bold,
+        text_alignment: match style.alignment {
+            TextAlignment::Left => 0,
+            TextAlignment::Center => 1,
+            TextAlignment::Right => 2,
+        },
+        serial_number: annotation
+            .document
+            .selected_serial_number()
+            .unwrap_or_else(|| annotation.document.next_serial_number())
+            as f32,
+        selected_is_serial: annotation.document.selected_serial_number().is_some(),
+        selected_tool: annotation
+            .document
+            .selected_tool()
+            .map(annotation_tool_id)
+            .unwrap_or(0),
+        ocr_available: !annotation.document.ocr_blocks().is_empty(),
+        selected_text: annotation
+            .document
+            .selected_text()
+            .unwrap_or_default()
+            .to_string(),
+        has_selected_element: annotation.document.selected_id().is_some()
+            || annotation.document.selected_ocr_id().is_some(),
+    }
+}
+
+fn apply_annotation_snapshot(
+    capture: &CaptureWindow,
+    snapshot: AnnotationUiSnapshot,
+) -> Result<(), String> {
+    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(snapshot.width, snapshot.height);
+    if pixels.make_mut_bytes().len() != snapshot.pixels.len() {
+        return Err("标注帧尺寸与像素数据不一致。".to_string());
+    }
+    pixels.make_mut_bytes().copy_from_slice(&snapshot.pixels);
+    capture.set_annotation_frame(Image::from_rgba8(pixels));
+    capture.set_annotation_visible(true);
+    capture.set_annotation_tool(snapshot.tool);
+    capture.set_annotation_can_undo(snapshot.can_undo);
+    capture.set_annotation_can_redo(snapshot.can_redo);
+    capture.set_annotation_color(Color::from_rgb_u8(
+        snapshot.color.red,
+        snapshot.color.green,
+        snapshot.color.blue,
+    ));
+    capture.set_annotation_color_label(snapshot.color_label.into());
+    capture.set_ocr_selected_text(snapshot.selected_ocr_text.into());
+    capture.set_ocr_manual_color(snapshot.ocr_manual_color);
+    capture.set_ocr_text(snapshot.ocr_text.into());
+    capture.set_ocr_visible(snapshot.ocr_visible);
+    capture.set_style_stroke_color(slint_color(snapshot.stroke_color));
+    capture.set_style_fill_color(slint_color(snapshot.fill_color));
+    capture.set_style_text_color(slint_color(snapshot.text_color));
+    capture.set_style_stroke_hex(snapshot.stroke_hex.into());
+    capture.set_style_fill_hex(snapshot.fill_hex.into());
+    capture.set_style_text_hex(snapshot.text_hex.into());
+    capture.set_style_stroke_width(snapshot.stroke_width);
+    capture.set_style_opacity(snapshot.opacity_percent);
+    capture.set_style_brush_size(snapshot.brush_size);
+    capture.set_style_effect_strength(snapshot.effect_percent);
+    capture.set_style_font_size(snapshot.font_size);
+    capture.set_style_bold(snapshot.bold);
+    capture.set_style_text_alignment(snapshot.text_alignment);
+    capture.set_style_serial_number(snapshot.serial_number);
+    capture.set_selected_is_serial(snapshot.selected_is_serial);
+    capture.set_selected_annotation_tool(snapshot.selected_tool);
+    capture.set_ocr_available(snapshot.ocr_available);
+    capture.set_selected_text(snapshot.selected_text.into());
+    capture.set_has_selected_element(snapshot.has_selected_element);
+    capture.window().request_redraw();
+    Ok(())
+}
+
+fn clear_annotation_ui(capture: &CaptureWindow) {
+    capture.set_annotation_visible(false);
+    capture.set_annotation_tool(0);
+    capture.set_annotation_can_undo(false);
+    capture.set_annotation_can_redo(false);
+    capture.set_annotation_color(Color::from_rgb_u8(232, 68, 68));
+    capture.set_annotation_color_label("#E84444".into());
+    capture.set_ocr_selected_text(String::new().into());
+    capture.set_ocr_manual_color(false);
+    capture.set_ocr_text(String::new().into());
+    capture.set_ocr_visible(false);
+    capture.set_ocr_busy(false);
+    capture.set_ocr_status(String::new().into());
+    capture.set_style_stroke_color(Color::from_argb_u8(255, 232, 68, 68));
+    capture.set_style_fill_color(Color::from_argb_u8(28, 232, 68, 68));
+    capture.set_style_text_color(Color::from_argb_u8(255, 232, 68, 68));
+    capture.set_style_stroke_hex("#E84444".into());
+    capture.set_style_fill_hex("#E844441C".into());
+    capture.set_style_text_hex("#E84444".into());
+    capture.set_style_stroke_width(6.0);
+    capture.set_style_opacity(100.0);
+    capture.set_style_brush_size(22.0);
+    capture.set_style_effect_strength(55.0);
+    capture.set_style_font_size(24.0);
+    capture.set_style_bold(false);
+    capture.set_style_text_alignment(0);
+    capture.set_style_serial_number(1.0);
+    capture.set_selected_is_serial(false);
+    capture.set_selected_annotation_tool(0);
+    capture.set_ocr_available(false);
+    capture.set_selected_text(String::new().into());
+    capture.set_has_selected_element(false);
+}
+
+fn slint_color(color: RgbaColor) -> Color {
+    Color::from_argb_u8(color.alpha, color.red, color.green, color.blue)
+}
+
+fn restore_annotation_ui(capture: &CaptureWindow, session: &CaptureSession) -> Result<(), String> {
+    let snapshot = session
+        .annotation
+        .lock()
+        .map_err(|_| "标注会话状态不可用。".to_string())?
+        .as_ref()
+        .map(annotation_snapshot);
+    match snapshot {
+        Some(snapshot) => apply_annotation_snapshot(capture, snapshot),
+        None => {
+            clear_annotation_ui(capture);
+            Ok(())
+        }
+    }
 }
 
 fn transform_selection(
@@ -1557,6 +3141,7 @@ fn resume_region_capture(
     capture_window: WeakCaptureWindow,
     session: SharedCaptureSession,
     pins: SharedPins,
+    ocr: SharedOcrContext,
     selection: Option<FloatRect>,
     status: &str,
 ) {
@@ -1567,7 +3152,14 @@ fn resume_region_capture(
             let app = app_weak
                 .upgrade()
                 .ok_or_else(|| "设置窗口已不可用。".to_string())?;
-            create_capture_window(&app, &capture_window, Arc::clone(&session), pins, selection)
+            create_capture_window(
+                &app,
+                &capture_window,
+                Arc::clone(&session),
+                pins,
+                ocr,
+                selection,
+            )
         });
 
     if let Err(error) = show_result {
@@ -1636,6 +3228,9 @@ fn clear_window_targets(session: &CaptureSession) {
 fn clear_capture_data(session: &CaptureSession) {
     clear_frame(session);
     clear_window_targets(session);
+    if let Ok(mut annotation) = session.annotation.lock() {
+        annotation.take();
+    }
 }
 
 fn toggle_pin_visibility(app_weak: &slint::Weak<AppWindow>, pins: &SharedPins) {
@@ -1696,8 +3291,9 @@ fn set_status(app_weak: &slint::Weak<AppWindow>, status: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FloatPoint, FloatRect, PIN_MAX_HEIGHT, PIN_MAX_WIDTH, PIN_MIN_HEIGHT, PIN_MIN_WIDTH,
-        ResizeCorner, ResizeLimits, WindowRect, fitted_pin_size, normalized_window_rect,
+        FloatPoint, FloatRect, OcrDetectResult, PIN_MAX_HEIGHT, PIN_MAX_WIDTH, PIN_MIN_HEIGHT,
+        PIN_MIN_WIDTH, ResizeCorner, ResizeLimits, WindowRect, fitted_pin_size,
+        map_canvas_point_to_frame, normalized_window_rect, ocr_blocks_from_result,
         resize_rect_from_pointer, scale_rect_around_point, transform_selection,
     };
 
@@ -2149,6 +3745,58 @@ mod tests {
                 right: 320.0,
                 bottom: 210.0,
             },
+        );
+    }
+
+    #[test]
+    fn ocr_box_points_are_mapped_back_from_detector_scale() {
+        let result: OcrDetectResult = serde_json::from_value(serde_json::json!({
+            "scale_factor": 1.5,
+            "text_blocks": [{
+                "box_points": [
+                    {"x": 30, "y": 45},
+                    {"x": 180, "y": 45},
+                    {"x": 180, "y": 90},
+                    {"x": 30, "y": 90}
+                ],
+                "box_score": 0.98,
+                "angle_index": 0,
+                "angle_score": 0.99,
+                "text": "坐标",
+                "text_score": 0.97
+            }]
+        }))
+        .unwrap();
+        let blocks = ocr_blocks_from_result(result);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].points[0].x, 20.0);
+        assert_eq!(blocks[0].points[0].y, 30.0);
+        assert_eq!(blocks[0].points[2].x, 120.0);
+        assert_eq!(blocks[0].points[2].y, 60.0);
+        assert!(blocks[0].angle_radians().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn magnifier_center_maps_to_the_same_physical_pixel_at_common_dpi_scales() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let frame_width = 2400_u32;
+            let frame_height = 1600_u32;
+            let canvas_width = frame_width as f32 / scale;
+            let canvas_height = frame_height as f32 / scale;
+            let mapped = map_canvas_point_to_frame(
+                800.0 / scale,
+                600.0 / scale,
+                canvas_width,
+                canvas_height,
+                frame_width,
+                frame_height,
+            )
+            .unwrap();
+            assert_eq!(mapped, (800, 600), "scale {scale}");
+        }
+        assert_eq!(
+            map_canvas_point_to_frame(-100.0, 9_999.0, 100.0, 100.0, 400, 300),
+            Some((0, 299))
         );
     }
 }

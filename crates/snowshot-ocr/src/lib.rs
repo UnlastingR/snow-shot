@@ -25,7 +25,7 @@ pub enum OcrModel {
     RapidOcrV4,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OcrDetectResult {
     pub text_blocks: Vec<TextBlock>,
     pub scale_factor: f32,
@@ -35,6 +35,59 @@ impl Default for OcrService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl OcrDetectResult {
+    pub fn plain_text(&self) -> String {
+        let mut merged = String::new();
+        for text in self
+            .text_blocks
+            .iter()
+            .map(|block| block.text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            if let Some(previous) = merged.chars().last() {
+                let current = text.chars().next().unwrap_or_default();
+                if preserves_line_break(previous, text) {
+                    merged.push('\n');
+                } else if !is_cjk(previous) && !is_cjk(current) {
+                    merged.push(' ');
+                }
+            }
+            merged.push_str(text);
+        }
+        merged
+    }
+}
+
+fn preserves_line_break(previous: char, current_line: &str) -> bool {
+    matches!(
+        previous,
+        '。' | '！' | '？' | '；' | '：' | '!' | '?' | ';' | ':'
+    ) || current_line
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '-' | '•' | '·' | '●' | '○'))
+        || current_line
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+            && current_line
+                .chars()
+                .skip_while(|character| character.is_ascii_digit())
+                .next()
+                .is_some_and(|character| matches!(character, '.' | ')' | '、'))
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x3040..=0x30FF
+            | 0xAC00..=0xD7AF
+    )
 }
 
 impl OcrService {
@@ -203,13 +256,13 @@ impl OcrService {
         // Preserve the existing minimum effective scale used by the legacy implementation.
         let target_scale_factor = 1.5;
         if scale_factor < target_scale_factor && scale_factor > 0.0 {
-            scale_factor = target_scale_factor;
             let resize_factor = target_scale_factor / scale_factor;
             image = image.resize(
                 (image.width() as f32 * resize_factor) as u32,
                 (image.height() as f32 * resize_factor) as u32,
                 image::imageops::FilterType::Lanczos3,
             );
+            scale_factor = target_scale_factor;
         }
 
         let max_size = image.height().max(image.width());
@@ -243,6 +296,20 @@ impl OcrService {
             }),
             Err(e) => Err(format!("[ocr_detect_core] Failed to detect text: {}", e)),
         }
+    }
+
+    pub async fn detect_rgba(
+        &mut self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+        detect_angle: bool,
+    ) -> Result<OcrDetectResult, String> {
+        let image = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "[OcrService::detect_rgba] Invalid RGBA image".to_string())?;
+        self.detect(DynamicImage::ImageRgba8(image), scale_factor, detect_angle)
+            .await
     }
 
     /// Release the ONNX session, or rebuild it when hot start is enabled.
@@ -287,6 +354,60 @@ mod tests {
     fn rgba_conversion_preserves_rgb_channels() {
         let rgba = [1, 2, 3, 255, 10, 20, 30, 128];
         assert_eq!(convert_rgba_to_rgb(&rgba), [1, 2, 3, 10, 20, 30]);
+    }
+
+    #[test]
+    fn plain_text_merges_wrapped_lines_and_preserves_sentence_breaks() {
+        let result = OcrDetectResult {
+            text_blocks: vec![
+                TextBlock {
+                    box_points: Vec::new(),
+                    box_score: 1.0,
+                    angle_index: 0,
+                    angle_score: 1.0,
+                    text: " 第一行 ".to_string(),
+                    text_score: 1.0,
+                },
+                TextBlock {
+                    box_points: Vec::new(),
+                    box_score: 1.0,
+                    angle_index: 0,
+                    angle_score: 1.0,
+                    text: " ".to_string(),
+                    text_score: 1.0,
+                },
+                TextBlock {
+                    box_points: Vec::new(),
+                    box_score: 1.0,
+                    angle_index: 0,
+                    angle_score: 1.0,
+                    text: "第二行。".to_string(),
+                    text_score: 1.0,
+                },
+                TextBlock {
+                    box_points: Vec::new(),
+                    box_score: 1.0,
+                    angle_index: 0,
+                    angle_score: 1.0,
+                    text: "Next line".to_string(),
+                    text_score: 1.0,
+                },
+            ],
+            scale_factor: 1.0,
+        };
+
+        assert_eq!(result.plain_text(), "第一行第二行。\nNext line");
+    }
+
+    #[tokio::test]
+    async fn rgba_detection_rejects_invalid_buffer_before_loading_models() {
+        let mut service = OcrService::new();
+        let error = service
+            .detect_rgba(vec![0; 3], 1, 1, 1.0, true)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Invalid RGBA image"));
     }
 
     #[tokio::test]

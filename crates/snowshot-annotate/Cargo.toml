@@ -1,0 +1,13 @@
+[package]
+name = "snow-shot-annotate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+workspace = "../../src-tauri"
+
+[dependencies]
+ab_glyph = "0.2.32"
+fontdb = "0.23.0"
+image = { workspace = true }
+imageproc = "0.25.0"
+serde = { workspace = true }
