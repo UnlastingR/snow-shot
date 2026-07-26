@@ -5,5 +5,5 @@ pub use color::{CmykColor, HslColor, HsvColor, RgbaColor};
 pub use document::{
     AnnotationDocument, AnnotationElement, AnnotationError, AnnotationTool, ElementId, ElementKind,
     ElementStyle, LayerCommand, OcrBlock, OcrLayerStyle, Point, Rect, SelectionHandle, StylePatch,
-    TextAlignment,
+    TextAlignment, apply_style_patch,
 };

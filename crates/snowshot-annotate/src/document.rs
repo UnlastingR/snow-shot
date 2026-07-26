@@ -277,6 +277,23 @@ impl AnnotationElement {
     pub fn supports_rotation(&self) -> bool {
         matches!(self.kind, ElementKind::Shape { .. })
     }
+
+    /// Selection frame in local (unrotated) coordinates, plus the rotation
+    /// applied about the frame's center when drawing or hit-testing it.
+    pub fn selection_frame(&self) -> (Rect, f32) {
+        match &self.kind {
+            ElementKind::Shape {
+                start,
+                end,
+                rotation_radians,
+                ..
+            } => (
+                Rect::from_points(*start, *end).expanded(self.style.stroke_width / 2.0),
+                *rotation_radians,
+            ),
+            _ => (self.bounds(), 0.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -804,6 +821,26 @@ impl AnnotationDocument {
                             value
                         };
                     }
+                } else if let Some((new_start, new_end)) = resize_rotated_shape(
+                    original,
+                    *handle,
+                    *start_pointer,
+                    point,
+                    preserve_aspect,
+                    centered,
+                    self.width,
+                    self.height,
+                ) {
+                    if let Some(element) = self
+                        .state
+                        .elements
+                        .iter_mut()
+                        .find(|element| element.id == id)
+                        && let ElementKind::Shape { start, end, .. } = &mut element.kind
+                    {
+                        *start = new_start;
+                        *end = new_end;
+                    }
                 } else {
                     let transformed = transform_rect(
                         *start_bounds,
@@ -1244,18 +1281,21 @@ impl AnnotationDocument {
             .selected
             .and_then(|id| self.element(id))
             .map(|element| {
+                let (frame, rotation) = element.selection_frame();
                 (
-                    element.bounds(),
+                    frame,
+                    rotation,
                     element.supports_resize(),
                     element.supports_rotation(),
                 )
             });
-        if let Some((bounds, true, show_rotation)) = selected {
+        if let Some((frame, rotation, true, show_rotation)) = selected {
             draw_selection(
                 &mut self.preview_pixels,
                 self.width,
                 self.height,
-                bounds,
+                frame,
+                rotation,
                 true,
                 show_rotation,
             );
@@ -1321,7 +1361,7 @@ impl AnnotationDocument {
     }
 }
 
-fn apply_style_patch(style: &mut ElementStyle, patch: &StylePatch) {
+pub fn apply_style_patch(style: &mut ElementStyle, patch: &StylePatch) {
     if let Some(value) = patch.stroke {
         style.stroke = value;
     }
@@ -1421,15 +1461,16 @@ fn distance_to_segment(point: Point, start: Point, end: Point) -> f32 {
 }
 
 fn selection_handle_for_element(element: &AnnotationElement, point: Point) -> SelectionHandle {
+    let (frame, rotation) = element.selection_frame();
+    let local_point = rotate_point(point, frame.center(), -rotation);
     if element.supports_rotation() {
-        let bounds = element.bounds();
-        let rotation_handle = Point::new((bounds.left + bounds.right) / 2.0, bounds.top - 24.0);
-        if rotation_handle.distance(point) <= HANDLE_RADIUS * 1.8 {
+        let rotation_handle = Point::new((frame.left + frame.right) / 2.0, frame.top - 24.0);
+        if rotation_handle.distance(local_point) <= HANDLE_RADIUS * 1.8 {
             return SelectionHandle::Rotate;
         }
     }
     if element.supports_resize() {
-        hit_selection_handle(element.bounds(), point)
+        hit_selection_handle(frame, local_point)
     } else if hit_element(element, point) {
         SelectionHandle::Move
     } else {
@@ -1657,6 +1698,70 @@ fn project_size_to_aspect(raw_width: f32, raw_height: f32, aspect: f32) -> (f32,
     let denominator = aspect * aspect + 1.0;
     let projected_height = (raw_width * aspect + raw_height) / denominator;
     (projected_height * aspect, projected_height)
+}
+
+/// Resize or move a rotated shape by working in its local (unrotated) frame.
+/// Returns the new start/end corners, or `None` when the element is not a
+/// rotated shape and the axis-aligned path should be used instead.
+#[allow(clippy::too_many_arguments)]
+fn resize_rotated_shape(
+    element: &AnnotationElement,
+    handle: SelectionHandle,
+    start_pointer: Point,
+    pointer: Point,
+    preserve_aspect: bool,
+    centered: bool,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<(Point, Point)> {
+    let ElementKind::Shape {
+        start,
+        end,
+        rotation_radians,
+        ..
+    } = &element.kind
+    else {
+        return None;
+    };
+    let rotation = *rotation_radians;
+    if rotation.abs() <= f32::EPSILON {
+        return None;
+    }
+    let local = Rect::from_points(*start, *end);
+    let center = local.center();
+    // A pure translation commutes with rotation about the frame's own center,
+    // so Move works directly with world-space pointer deltas.
+    let (from_pointer, to_pointer) = if handle == SelectionHandle::Move {
+        (start_pointer, pointer)
+    } else {
+        (
+            rotate_point(start_pointer, center, -rotation),
+            rotate_point(pointer, center, -rotation),
+        )
+    };
+    let resized = transform_rect(
+        local,
+        handle,
+        from_pointer,
+        to_pointer,
+        preserve_aspect,
+        centered,
+        canvas_width,
+        canvas_height,
+    );
+    let delta = if handle == SelectionHandle::Move {
+        Point::new(0.0, 0.0)
+    } else {
+        // Rendering rotates about the resized frame's center, so shift the
+        // frame to keep the untouched geometry anchored in screen space.
+        let offset = Point::new(center.x - resized.center().x, center.y - resized.center().y);
+        let rotated = rotate_point(offset, Point::new(0.0, 0.0), rotation);
+        Point::new(offset.x - rotated.x, offset.y - rotated.y)
+    };
+    Some((
+        Point::new(resized.left + delta.x, resized.top + delta.y),
+        Point::new(resized.right + delta.x, resized.bottom + delta.y),
+    ))
 }
 
 fn transform_element(element: &AnnotationElement, from: Rect, to: Rect) -> AnnotationElement {
@@ -2321,23 +2426,6 @@ fn fill_rect(pixels: &mut [u8], width: u32, height: u32, rect: Rect, color: Rgba
     }
 }
 
-fn draw_rect_outline(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    rect: Rect,
-    color: RgbaColor,
-    stroke_width: f32,
-) {
-    let points = [
-        Point::new(rect.left, rect.top),
-        Point::new(rect.right, rect.top),
-        Point::new(rect.right, rect.bottom),
-        Point::new(rect.left, rect.bottom),
-    ];
-    draw_quad_outline(pixels, width, height, points, color, stroke_width);
-}
-
 fn draw_ellipse_outline(
     pixels: &mut [u8],
     width: u32,
@@ -2414,11 +2502,20 @@ fn draw_selection(
     width: u32,
     height: u32,
     bounds: Rect,
+    rotation: f32,
     show_handles: bool,
     show_rotation: bool,
 ) {
     let color = RgbaColor::new(25, 190, 180, 255);
-    draw_rect_outline(pixels, width, height, bounds, color, 2.0);
+    let center = bounds.center();
+    let place = |point: Point| rotate_point(point, center, rotation);
+    let corners = [
+        place(Point::new(bounds.left, bounds.top)),
+        place(Point::new(bounds.right, bounds.top)),
+        place(Point::new(bounds.right, bounds.bottom)),
+        place(Point::new(bounds.left, bounds.bottom)),
+    ];
+    draw_polygon_outline(pixels, width, height, &corners, color, 2.0);
     if show_handles {
         for point in [
             Point::new(bounds.left, bounds.top),
@@ -2430,12 +2527,14 @@ fn draw_selection(
             Point::new(bounds.left, bounds.bottom),
             Point::new(bounds.left, (bounds.top + bounds.bottom) / 2.0),
         ] {
+            let point = place(point);
             draw_disc(pixels, width, height, point, 4.5, RgbaColor::WHITE);
             draw_disc(pixels, width, height, point, 3.0, color);
         }
         if show_rotation {
-            let anchor = Point::new((bounds.left + bounds.right) / 2.0, bounds.top);
-            let handle = Point::new(anchor.x, bounds.top - 24.0);
+            let center_x = (bounds.left + bounds.right) / 2.0;
+            let anchor = place(Point::new(center_x, bounds.top));
+            let handle = place(Point::new(center_x, bounds.top - 24.0));
             draw_thick_line(pixels, width, height, anchor, handle, color, 1.5);
             draw_disc(pixels, width, height, handle, 5.0, RgbaColor::WHITE);
             draw_disc(pixels, width, height, handle, 3.5, color);
@@ -2855,6 +2954,99 @@ mod tests {
         assert_eq!(document.selected_ocr_text(), Some("测试"));
         assert_eq!(document.pixels(), output_before);
         assert_ne!(document.preview_pixels(), output_before);
+    }
+
+    fn drag_selection(document: &mut AnnotationDocument, from: Point, to: Point) {
+        document.begin_with_style(
+            AnnotationTool::Select,
+            from,
+            ElementStyle::default(),
+            false,
+            false,
+        );
+        assert!(document.commit(to));
+    }
+
+    #[test]
+    fn rotated_shape_selection_handles_follow_the_rotation() {
+        let mut document = document();
+        document.begin(
+            AnnotationTool::Rectangle,
+            Point::new(40.0, 40.0),
+            RgbaColor::RED,
+            4.0,
+        );
+        assert!(document.commit(Point::new(120.0, 100.0)));
+        // 拖动旋转手柄（局部位置 80,14），把矩形旋转 90°。
+        drag_selection(
+            &mut document,
+            Point::new(80.0, 14.0),
+            Point::new(136.0, 70.0),
+        );
+        let ElementKind::Shape {
+            rotation_radians, ..
+        } = document.elements()[0].kind
+        else {
+            panic!("expected shape");
+        };
+        assert!((rotation_radians - std::f32::consts::FRAC_PI_2).abs() < 0.001);
+        // 手柄跟随旋转：旋转手柄移到右侧，左上角手柄移到旋转后的位置，
+        // 原先未旋转的手柄位置不再命中。
+        assert_eq!(
+            document.selection_handle_at(Point::new(136.0, 70.0)),
+            SelectionHandle::Rotate
+        );
+        assert_eq!(
+            document.selection_handle_at(Point::new(112.0, 28.0)),
+            SelectionHandle::TopLeft
+        );
+        assert_eq!(
+            document.selection_handle_at(Point::new(38.0, 38.0)),
+            SelectionHandle::None
+        );
+    }
+
+    #[test]
+    fn resizing_a_rotated_shape_works_in_its_rotated_frame() {
+        let mut document = document();
+        document.begin(
+            AnnotationTool::Rectangle,
+            Point::new(40.0, 40.0),
+            RgbaColor::RED,
+            4.0,
+        );
+        assert!(document.commit(Point::new(120.0, 100.0)));
+        // 旋转 180°：局部左上角手柄出现在屏幕 (122,102)。
+        drag_selection(
+            &mut document,
+            Point::new(80.0, 14.0),
+            Point::new(80.0, 126.0),
+        );
+        assert_eq!(
+            document.selection_handle_at(Point::new(122.0, 102.0)),
+            SelectionHandle::TopLeft
+        );
+        // 沿屏幕对角向外拖 10px：局部矩形反向扩大，且对角保持锚定。
+        drag_selection(
+            &mut document,
+            Point::new(122.0, 102.0),
+            Point::new(132.0, 112.0),
+        );
+        let ElementKind::Shape {
+            start,
+            end,
+            rotation_radians,
+            ..
+        } = document.elements()[0].kind
+        else {
+            panic!("expected shape");
+        };
+        assert!((rotation_radians - std::f32::consts::PI).abs() < 0.001);
+        let rect = Rect::from_points(start, end);
+        assert!((rect.left - 40.0).abs() < 0.1);
+        assert!((rect.top - 40.0).abs() < 0.1);
+        assert!((rect.right - 130.0).abs() < 0.1);
+        assert!((rect.bottom - 110.0).abs() < 0.1);
     }
 
     #[test]

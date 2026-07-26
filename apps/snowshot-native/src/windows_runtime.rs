@@ -13,7 +13,7 @@ use slint::{
 };
 use snow_shot_annotate::{
     AnnotationDocument, AnnotationTool, ElementStyle, LayerCommand, OcrBlock, OcrLayerStyle, Point,
-    RgbaColor, SelectionHandle, StylePatch, TextAlignment,
+    RgbaColor, SelectionHandle, StylePatch, TextAlignment, apply_style_patch,
 };
 use snow_shot_capture::PixelRect;
 use snow_shot_ocr::OcrDetectResult;
@@ -2887,14 +2887,9 @@ fn update_annotation_color(
             };
             let persist = if annotation.document.selected_id().is_some() {
                 annotation.document.update_selected_style(&patch);
-                None
+                sync_tool_style_after_selection_edit(annotation, &patch)
             } else {
-                match slot {
-                    0 => annotation.style.stroke = color,
-                    1 => annotation.style.fill = color,
-                    2 => annotation.style.text = color,
-                    _ => {}
-                }
+                apply_style_patch(&mut annotation.style, &patch);
                 annotation.color = annotation.style.stroke;
                 Some(PersistedAnnotationStyle::Tool(
                     annotation.tool,
@@ -2946,6 +2941,7 @@ fn update_annotation_color_alpha(
 
 enum PersistedAnnotationStyle {
     Tool(i32, ElementStyle),
+    ToolPatch(i32, StylePatch),
     Ocr(OcrLayerStyle),
 }
 
@@ -2966,9 +2962,37 @@ fn persist_annotation_style(
                 settings.set_style(tool, style);
             }
         }
+        PersistedAnnotationStyle::ToolPatch(tool_id, patch) => {
+            if let Some(tool) = annotation_tool(tool_id) {
+                let mut style = settings.style(tool);
+                apply_style_patch(&mut style, &patch);
+                settings.set_style(tool, style);
+            }
+        }
         PersistedAnnotationStyle::Ocr(style) => settings.set_ocr_style(style),
     }
     settings.save()
+}
+
+/// Editing a selected element also becomes the new default for that element's
+/// tool, so freshly drawn objects inherit the parameters instead of resetting.
+fn sync_tool_style_after_selection_edit(
+    annotation: &mut AnnotationState,
+    patch: &StylePatch,
+) -> Option<PersistedAnnotationStyle> {
+    let element_tool = annotation.document.selected_tool()?;
+    let tool_id = annotation_tool_id(element_tool);
+    if tool_id == annotation.tool {
+        apply_style_patch(&mut annotation.style, patch);
+        annotation.stroke_width = annotation.style.stroke_width;
+        annotation.color = annotation.style.stroke;
+        Some(PersistedAnnotationStyle::Tool(
+            annotation.tool,
+            annotation.style.clone(),
+        ))
+    } else {
+        Some(PersistedAnnotationStyle::ToolPatch(tool_id, patch.clone()))
+    }
 }
 
 fn update_annotation_style_value(
@@ -3038,24 +3062,9 @@ fn update_annotation_style_value(
             };
             let persist = if annotation.document.selected_id().is_some() {
                 annotation.document.update_selected_style(&patch);
-                None
+                sync_tool_style_after_selection_edit(annotation, &patch)
             } else {
-                match field {
-                    0 => annotation.style.stroke_width = value.clamp(1.0, 64.0),
-                    1 => annotation.style.opacity = (value / 100.0).clamp(0.0, 1.0),
-                    2 => annotation.style.brush_size = value.clamp(2.0, 256.0),
-                    3 => annotation.style.effect_strength = (value / 100.0).clamp(0.05, 1.0),
-                    4 => annotation.style.font_size = value.clamp(8.0, 160.0),
-                    5 => annotation.style.bold = value >= 0.5,
-                    6 => {
-                        annotation.style.alignment = match value.round() as i32 {
-                            1 => TextAlignment::Center,
-                            2 => TextAlignment::Right,
-                            _ => TextAlignment::Left,
-                        }
-                    }
-                    _ => {}
-                }
+                apply_style_patch(&mut annotation.style, &patch);
                 annotation.stroke_width = annotation.style.stroke_width;
                 Some(PersistedAnnotationStyle::Tool(
                     annotation.tool,
@@ -3867,6 +3876,66 @@ mod tests {
         assert!((actual.top - expected.top).abs() < EPSILON);
         assert!((actual.right - expected.right).abs() < EPSILON);
         assert!((actual.bottom - expected.bottom).abs() < EPSILON);
+    }
+
+    fn annotation_state_with_selected_element(
+        tool: super::AnnotationTool,
+        tool_id: i32,
+    ) -> super::AnnotationState {
+        use snow_shot_annotate::{AnnotationDocument, ElementStyle, Point, RgbaColor};
+        let mut document = AnnotationDocument::new(160, 120, vec![255; 160 * 120 * 4]).unwrap();
+        document.begin(tool, Point::new(10.0, 10.0), RgbaColor::RED, 4.0);
+        assert!(document.commit(Point::new(60.0, 40.0)));
+        assert!(document.selected_id().is_some());
+        super::AnnotationState {
+            region: snow_shot_capture::PixelRect::new(0, 0, 160, 120).unwrap(),
+            document,
+            tool: tool_id,
+            previous_tool: tool_id,
+            color: RgbaColor::RED,
+            stroke_width: 4.0,
+            style: ElementStyle::for_tool(tool, RgbaColor::RED, 4.0),
+        }
+    }
+
+    #[test]
+    fn selection_edit_updates_tool_defaults_for_new_objects() {
+        use snow_shot_annotate::StylePatch;
+        let mut annotation = annotation_state_with_selected_element(super::AnnotationTool::Pen, 1);
+        let patch = StylePatch {
+            stroke_width: Some(12.0),
+            opacity: Some(0.4),
+            ..StylePatch::default()
+        };
+        annotation.document.update_selected_style(&patch);
+        let persist = super::sync_tool_style_after_selection_edit(&mut annotation, &patch);
+        assert_eq!(annotation.style.stroke_width, 12.0);
+        assert_eq!(annotation.style.opacity, 0.4);
+        assert_eq!(annotation.stroke_width, 12.0);
+        assert!(matches!(
+            persist,
+            Some(super::PersistedAnnotationStyle::Tool(1, ref style))
+                if style.stroke_width == 12.0
+        ));
+    }
+
+    #[test]
+    fn selection_edit_with_select_tool_persists_to_element_tool() {
+        use snow_shot_annotate::StylePatch;
+        let mut annotation =
+            annotation_state_with_selected_element(super::AnnotationTool::Rectangle, 0);
+        let patch = StylePatch {
+            stroke_width: Some(9.0),
+            ..StylePatch::default()
+        };
+        annotation.document.update_selected_style(&patch);
+        let persist = super::sync_tool_style_after_selection_edit(&mut annotation, &patch);
+        assert_eq!(annotation.style.stroke_width, 4.0);
+        assert!(matches!(
+            persist,
+            Some(super::PersistedAnnotationStyle::ToolPatch(8, ref applied))
+                if applied.stroke_width == Some(9.0)
+        ));
     }
 
     #[test]
