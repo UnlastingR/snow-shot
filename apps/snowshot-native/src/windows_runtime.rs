@@ -818,7 +818,6 @@ fn bind_capture_callbacks(
                 monitor_origin_x: frozen.origin_x(),
                 monitor_origin_y: frozen.origin_y(),
                 monitor_width: frozen.width(),
-                monitor_height: frozen.height(),
                 region,
                 initial_frame,
             })

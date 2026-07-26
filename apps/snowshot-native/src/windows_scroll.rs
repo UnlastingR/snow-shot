@@ -3,39 +3,55 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use image::imageops::FilterType;
 use image::{DynamicImage, RgbaImage};
 use snow_shot_capture::PixelRect;
 use snow_shot_scroll::scroll_screenshot_service::{
     ScrollDirection, ScrollImageList, ScrollScreenshotConfig, ScrollScreenshotService,
 };
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
-    EndPaint, FillRect, HGDIOBJ, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
+    AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+    BLENDFUNCTION, BeginPaint, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection,
+    CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT,
+    DT_SINGLELINE, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GdiFlush, GetDC, HGDIOBJ,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetClientRect, IDC_ARROW, LoadCursorW, MSG, MSLLHOOKSTRUCT, PM_REMOVE, PeekMessageW,
-    RegisterClassW, SW_SHOWNOACTIVATE, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_ERASEBKGND, WM_MOUSEWHEEL, WM_PAINT, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    ULW_ALPHA, UnhookWindowsHookEx, UpdateLayeredWindow, WH_MOUSE_LL, WM_ERASEBKGND, WM_MOUSEWHEEL,
+    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::capture_workflow::{FrozenRegionFrame, capture_live_region};
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("SnowShotScrollCaptureOverlay");
+const LAYERED_CLASS_NAME: PCWSTR = w!("SnowShotScrollCaptureLayered");
 const OVERLAY_TITLE: PCWSTR = w!("Snow Shot 长截图");
 const BORDER_THICKNESS: i32 = 2;
-const TIP_WIDTH: i32 = 360;
-const TIP_HEIGHT: i32 = 34;
+// Mirrors the original scroll-screenshot UI: a 128px thumbnail strip beside the
+// selection (`THUMBNAIL_WIDTH`), an 8px gap (`token.marginXS`) and a 32% black
+// mask over stitched content outside the current capture edge.
+const STRIP_BASE_WIDTH: f32 = 128.0;
+const STRIP_GAP: f32 = 8.0;
+const EDGE_MASK_NUMERATOR: u32 = 174; // keep 68% brightness ≈ rgba(0,0,0,0.32) overlay
+const PILL_ALPHA: u32 = 115; // antd colorBgMask rgba(0,0,0,0.45)
+const PILL_TEXT: &str = "滚动页面拼接长图，Enter 完成，Esc 取消";
 const CAPTURE_IDLE_DELAY: Duration = Duration::from_millis(55);
 const CAPTURE_MAX_DELAY: Duration = Duration::from_millis(140);
 const LOOP_INTERVAL: Duration = Duration::from_millis(8);
 
 static OVERLAY_CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
+static LAYERED_CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
 static WHEEL_SENDER: OnceLock<Mutex<Option<Sender<ScrollImageList>>>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -43,7 +59,6 @@ pub(crate) struct ScrollCaptureRequest {
     pub(crate) monitor_origin_x: i32,
     pub(crate) monitor_origin_y: i32,
     pub(crate) monitor_width: u32,
-    pub(crate) monitor_height: u32,
     pub(crate) region: PixelRect,
     pub(crate) initial_frame: FrozenRegionFrame,
 }
@@ -69,12 +84,53 @@ pub(crate) fn run_scroll_capture(
         min_size_delta: ((request.region.height() as f32 * 0.8).ceil() as i32).max(64),
         ..ScrollScreenshotConfig::default()
     });
-    let _ = service.handle_image(
+    let seed_result = service.handle_image(
         DynamicImage::ImageRgba8(initial_image),
         ScrollImageList::Bottom,
     );
 
-    let _overlay = ScrollOverlay::create(&request)?;
+    let overlay = ScrollOverlay::create(&request)?;
+    let dpi = overlay
+        .windows
+        .first()
+        // SAFETY: the border HWND was just created and is owned by `overlay`.
+        .map(|hwnd| unsafe { GetDpiForWindow(*hwnd) })
+        .filter(|dpi| *dpi != 0)
+        .unwrap_or(96);
+    let ui_scale = dpi as f32 / 96.0;
+
+    let sel_left = request
+        .monitor_origin_x
+        .saturating_add(i32::try_from(request.region.x()).unwrap_or(i32::MAX));
+    let sel_top = request
+        .monitor_origin_y
+        .saturating_add(i32::try_from(request.region.y()).unwrap_or(i32::MAX));
+    let sel_width = i32::try_from(request.region.width()).unwrap_or(i32::MAX);
+    let sel_height = i32::try_from(request.region.height()).unwrap_or(i32::MAX);
+
+    let pill = TipPill::create(sel_left, sel_top, sel_width, sel_height, dpi)?;
+    let mut pill_visible = pill.is_some();
+
+    let strip_width = ((STRIP_BASE_WIDTH * ui_scale).round() as i32).max(32);
+    let strip_x = strip_screen_x(
+        request.monitor_origin_x,
+        request
+            .monitor_origin_x
+            .saturating_add(i32::try_from(request.monitor_width).unwrap_or(i32::MAX)),
+        sel_left,
+        sel_width,
+        (STRIP_GAP * ui_scale).round() as i32,
+        strip_width,
+    );
+    let mut strip = PreviewStrip::create(
+        strip_x,
+        sel_top,
+        strip_width as u32,
+        sel_height.max(1) as u32,
+        strip_width as f32 / request.region.width() as f32,
+    )?;
+    strip.note_result(&service, seed_result);
+
     let (wheel_sender, wheel_receiver) = mpsc::channel();
     let _hook = MouseHook::install(wheel_sender)?;
     let mut pending_direction = None;
@@ -86,6 +142,15 @@ pub(crate) fn run_scroll_capture(
     loop {
         pump_messages();
         while let Ok(direction) = wheel_receiver.try_recv() {
+            // The pill sits inside the selection: hide it on the first scroll so
+            // it never appears in sampled frames (captures start after the idle
+            // delay below), matching the original `setShowTip(false)` on wheel.
+            if pill_visible {
+                if let Some(pill) = &pill {
+                    pill.hide();
+                }
+                pill_visible = false;
+            }
             pending_direction = Some(direction);
             last_wheel = Instant::now();
         }
@@ -102,7 +167,8 @@ pub(crate) fn run_scroll_capture(
             .map_err(|error| error.to_string())?;
             let image = RgbaImage::from_raw(frame.width(), frame.height(), frame.rgba().to_vec())
                 .ok_or_else(|| "长截图采样图像尺寸无效。".to_string())?;
-            let _ = service.handle_image(DynamicImage::ImageRgba8(image), direction);
+            let result = service.handle_image(DynamicImage::ImageRgba8(image), direction);
+            strip.note_result(&service, result);
             pending_direction = None;
             last_capture = Instant::now();
         }
@@ -229,25 +295,22 @@ impl ScrollOverlay {
             .saturating_add(i32::try_from(request.region.y()).unwrap_or(i32::MAX));
         let width = i32::try_from(request.region.width()).unwrap_or(i32::MAX);
         let height = i32::try_from(request.region.height()).unwrap_or(i32::MAX);
-        let mut rects = vec![
+        let rects = vec![
             (
                 left - BORDER_THICKNESS,
                 top - BORDER_THICKNESS,
-                width + 4,
+                width + BORDER_THICKNESS * 2,
                 BORDER_THICKNESS,
             ),
             (
                 left - BORDER_THICKNESS,
                 top + height,
-                width + 4,
+                width + BORDER_THICKNESS * 2,
                 BORDER_THICKNESS,
             ),
             (left - BORDER_THICKNESS, top, BORDER_THICKNESS, height),
             (left + width, top, BORDER_THICKNESS, height),
         ];
-        if let Some((tip_x, tip_y)) = tip_position(request) {
-            rects.push((tip_x, tip_y, TIP_WIDTH, TIP_HEIGHT));
-        }
 
         let mut windows = Vec::with_capacity(rects.len());
         for (x, y, window_width, window_height) in rects {
@@ -306,23 +369,6 @@ unsafe extern "system" fn overlay_window_proc(
             let brush = unsafe { CreateSolidBrush(COLORREF(0x00A6_B813)) };
             unsafe {
                 FillRect(dc, &client, brush);
-            }
-            if client.bottom - client.top >= TIP_HEIGHT - 2 {
-                let mut text: Vec<u16> = "长截图中：滚动页面，Enter 完成，Esc 取消"
-                    .encode_utf16()
-                    .collect();
-                unsafe {
-                    SetBkMode(dc, TRANSPARENT);
-                    SetTextColor(dc, COLORREF(0x00FF_FFFF));
-                    DrawTextW(
-                        dc,
-                        &mut text,
-                        &mut client,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
-                }
-            }
-            unsafe {
                 let _ = EndPaint(hwnd, &paint);
                 let _ = DeleteObject(HGDIOBJ(brush.0));
             }
@@ -332,30 +378,527 @@ unsafe extern "system" fn overlay_window_proc(
     }
 }
 
-fn ensure_overlay_class() -> Result<u16, String> {
-    OVERLAY_CLASS
-        .get_or_init(|| {
-            let instance = module_instance()?;
-            let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
-                .map_err(|error| format!("无法加载长截图光标：{error}"))?;
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(overlay_window_proc),
-                hInstance: instance,
-                hCursor: cursor,
-                lpszClassName: OVERLAY_CLASS_NAME,
+// SAFETY: layered windows receive all content via UpdateLayeredWindow.
+unsafe extern "system" fn layered_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Click-through top-most window whose pixels come from a premultiplied BGRA
+/// buffer pushed through `UpdateLayeredWindow`.
+struct LayeredWindow {
+    hwnd: HWND,
+}
+
+impl LayeredWindow {
+    fn create() -> Result<Self, String> {
+        ensure_layered_class()?;
+        let instance = module_instance()?;
+        // SAFETY: the registered class and module remain valid for the process lifetime.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_LAYERED,
+                LAYERED_CLASS_NAME,
+                OVERLAY_TITLE,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+        }
+        .map_err(|error| format!("无法创建长截图预览层：{error}"))?;
+        Ok(Self { hwnd })
+    }
+
+    fn present(&self, x: i32, y: i32, width: u32, height: u32, bgra: &[u8]) -> Result<(), String> {
+        debug_assert_eq!(bgra.len(), width as usize * height as usize * 4);
+        // SAFETY: every GDI object created below is released before returning and
+        // the DIB pointer is only written while the section is selected.
+        unsafe {
+            let screen_dc = GetDC(None);
+            let memory_dc = CreateCompatibleDC(Some(screen_dc));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
-            let atom = unsafe { RegisterClassW(&class) };
-            if atom == 0 {
-                Err(format!(
-                    "无法注册长截图提示窗口类：{}",
-                    windows::core::Error::from_win32()
-                ))
-            } else {
-                Ok(atom)
+            let mut bits = std::ptr::null_mut();
+            let dib = CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+                .map_err(|error| {
+                    let _ = DeleteDC(memory_dc);
+                    ReleaseDC(None, screen_dc);
+                    format!("无法创建长截图预览位图：{error}")
+                })?;
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+            let previous = SelectObject(memory_dc, HGDIOBJ(dib.0));
+
+            let destination = POINT { x, y };
+            let size = SIZE {
+                cx: width as i32,
+                cy: height as i32,
+            };
+            let source = POINT { x: 0, y: 0 };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            let update = UpdateLayeredWindow(
+                self.hwnd,
+                Some(screen_dc),
+                Some(&destination as *const POINT),
+                Some(&size as *const SIZE),
+                Some(memory_dc),
+                Some(&source as *const POINT),
+                COLORREF(0),
+                Some(&blend as *const BLENDFUNCTION),
+                ULW_ALPHA,
+            );
+
+            SelectObject(memory_dc, previous);
+            let _ = DeleteObject(HGDIOBJ(dib.0));
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(None, screen_dc);
+            update.map_err(|error| format!("无法更新长截图预览层：{error}"))?;
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        Ok(())
+    }
+
+    fn hide(&self) {
+        // SAFETY: the window is owned by this instance.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+}
+
+impl Drop for LayeredWindow {
+    fn drop(&mut self) {
+        // SAFETY: the HWND was created and is exclusively owned by this instance.
+        let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+/// Centered instruction pill matching the original `touch-area-tip`: white text
+/// on a rounded 45% black mask background.
+struct TipPill {
+    window: LayeredWindow,
+}
+
+impl TipPill {
+    fn create(
+        sel_left: i32,
+        sel_top: i32,
+        sel_width: i32,
+        sel_height: i32,
+        dpi: u32,
+    ) -> Result<Option<Self>, String> {
+        let (width, height, pixels) = render_pill_bitmap(PILL_TEXT, dpi)?;
+        if width as i32 + 16 > sel_width || height as i32 + 16 > sel_height {
+            return Ok(None);
+        }
+        let window = LayeredWindow::create()?;
+        window.present(
+            sel_left + (sel_width - width as i32) / 2,
+            sel_top + (sel_height - height as i32) / 2,
+            width,
+            height,
+            &pixels,
+        )?;
+        Ok(Some(Self { window }))
+    }
+
+    fn hide(&self) {
+        self.window.hide();
+    }
+}
+
+/// Renders the pill text into a premultiplied BGRA bitmap. GDI cannot emit
+/// alpha, so coverage is recovered from the luminance of white-on-black text
+/// and blended over the pill's constant background alpha.
+fn render_pill_bitmap(text: &str, dpi: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    let scale = dpi as f32 / 96.0;
+    let pad_x = (16.0 * scale).round() as i32;
+    let pad_y = (7.0 * scale).round() as i32;
+    let radius = (6.0 * scale).round() as i32;
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+
+    // SAFETY: all GDI objects are created and released in this scope; the DIB
+    // bits stay valid while the section is selected into the memory DC.
+    unsafe {
+        let screen_dc = GetDC(None);
+        let memory_dc = CreateCompatibleDC(Some(screen_dc));
+        let font = CreateFontW(
+            -((14.0 * scale).round() as i32),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        );
+        let previous_font = SelectObject(memory_dc, HGDIOBJ(font.0));
+
+        let mut measure = RECT::default();
+        DrawTextW(
+            memory_dc,
+            &mut wide,
+            &mut measure,
+            DT_CALCRECT | DT_SINGLELINE,
+        );
+        let text_width = (measure.right - measure.left).max(1);
+        let text_height = (measure.bottom - measure.top).max(1);
+        let width = (text_width + pad_x * 2) as u32;
+        let height = (text_height + pad_y * 2) as u32;
+
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let dib = CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+            .map_err(|error| {
+                SelectObject(memory_dc, previous_font);
+                let _ = DeleteObject(HGDIOBJ(font.0));
+                let _ = DeleteDC(memory_dc);
+                ReleaseDC(None, screen_dc);
+                format!("无法创建长截图提示位图：{error}")
+            })?;
+        let previous_bitmap = SelectObject(memory_dc, HGDIOBJ(dib.0));
+
+        let byte_count = width as usize * height as usize * 4;
+        std::ptr::write_bytes(bits as *mut u8, 0, byte_count);
+        SetBkMode(memory_dc, TRANSPARENT);
+        SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
+        let mut text_rect = RECT {
+            left: pad_x,
+            top: pad_y,
+            right: pad_x + text_width,
+            bottom: pad_y + text_height,
+        };
+        DrawTextW(memory_dc, &mut wide, &mut text_rect, DT_SINGLELINE);
+        let _ = GdiFlush();
+
+        let mut pixels = std::slice::from_raw_parts(bits as *const u8, byte_count).to_vec();
+        for y in 0..height {
+            for x in 0..width {
+                let index = (y * width + x) as usize * 4;
+                if !rounded_rect_contains(x as i32, y as i32, width as i32, height as i32, radius) {
+                    pixels[index..index + 4].fill(0);
+                    continue;
+                }
+                let coverage = pixels[index].max(pixels[index + 1]).max(pixels[index + 2]) as u32;
+                let alpha = coverage + PILL_ALPHA * (255 - coverage) / 255;
+                pixels[index] = coverage as u8;
+                pixels[index + 1] = coverage as u8;
+                pixels[index + 2] = coverage as u8;
+                pixels[index + 3] = alpha as u8;
             }
+        }
+
+        SelectObject(memory_dc, previous_bitmap);
+        SelectObject(memory_dc, previous_font);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(None, screen_dc);
+        Ok((width, height, pixels))
+    }
+}
+
+fn rounded_rect_contains(x: i32, y: i32, width: i32, height: i32, radius: i32) -> bool {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return false;
+    }
+    let corner_x = if x < radius {
+        radius - 1 - x
+    } else if x >= width - radius {
+        x - (width - radius)
+    } else {
+        return true;
+    };
+    let corner_y = if y < radius {
+        radius - 1 - y
+    } else if y >= height - radius {
+        y - (height - radius)
+    } else {
+        return true;
+    };
+    corner_x * corner_x + corner_y * corner_y <= radius * radius
+}
+
+/// One stitched thumbnail segment; `top` is its offset in stitch coordinates
+/// (origin = top edge of the first captured frame).
+struct StripSegment {
+    top: i32,
+    thumb: RgbaImage,
+}
+
+/// Live preview of the stitched result beside the selection, mirroring the
+/// original `thumbnail-list`: segments accumulate in capture order and content
+/// outside the current viewport is dimmed by the capture-edge mask.
+struct PreviewStrip {
+    window: LayeredWindow,
+    screen_x: i32,
+    screen_y: i32,
+    width: u32,
+    height: u32,
+    scale: f32,
+    segments: Vec<StripSegment>,
+    viewport: (i32, i32),
+    edge_down: bool,
+}
+
+type ScrollHandleResult = (
+    Option<(i32, Option<ScrollImageList>)>,
+    bool,
+    ScrollImageList,
+);
+
+impl PreviewStrip {
+    fn create(
+        screen_x: i32,
+        screen_y: i32,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            window: LayeredWindow::create()?,
+            screen_x,
+            screen_y,
+            width,
+            height,
+            scale,
+            segments: Vec::new(),
+            viewport: (0, 0),
+            edge_down: true,
         })
+    }
+
+    fn note_result(&mut self, service: &ScrollScreenshotService, result: ScrollHandleResult) {
+        let Some((edge_position, appended)) = result.0 else {
+            return;
+        };
+        let frame_size = service.image_height as i32;
+        self.viewport = if edge_position >= 0 {
+            (edge_position - frame_size, edge_position)
+        } else {
+            (edge_position, edge_position + frame_size)
+        };
+        self.edge_down = edge_position >= 0;
+
+        if let Some(list) = appended {
+            let segment = match list {
+                ScrollImageList::Bottom => service.bottom_image_list.last(),
+                ScrollImageList::Top => service.top_image_list.last(),
+            };
+            if let Some(segment) = segment {
+                let thumb_height = ((segment.image.height() as f32 * self.scale).round() as u32)
+                    .clamp(1, self.height.max(1) * 4);
+                let thumb = image::imageops::resize(
+                    &segment.image.to_rgba8(),
+                    self.width.max(1),
+                    thumb_height,
+                    FilterType::Triangle,
+                );
+                let top = match list {
+                    // Cropped bottom segments cover [bottom_before - overlay, bottom_after).
+                    ScrollImageList::Bottom => {
+                        service.bottom_image_size - segment.image.height() as i32
+                    }
+                    // Cropped top segments cover [-top_after, -top_after + height).
+                    ScrollImageList::Top => -service.top_image_size,
+                };
+                self.segments.push(StripSegment { top, thumb });
+            }
+        }
+
+        let pixels = compose_strip(
+            &self.segments,
+            service.top_image_size,
+            service.bottom_image_size,
+            self.viewport,
+            self.edge_down,
+            self.scale,
+            self.width,
+            self.height,
+        );
+        let _ = self.window.present(
+            self.screen_x,
+            self.screen_y,
+            self.width,
+            self.height,
+            &pixels,
+        );
+    }
+}
+
+/// Composes the strip buffer (premultiplied BGRA): segments painted in capture
+/// order, auto-scrolled so the active capture edge stays visible, and content
+/// outside the viewport dimmed like the original 32% black edge mask.
+#[allow(clippy::too_many_arguments)]
+fn compose_strip(
+    segments: &[StripSegment],
+    top_size: i32,
+    bottom_size: i32,
+    viewport: (i32, i32),
+    edge_down: bool,
+    scale: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let width_px = width as usize;
+    let height_px = height as i32;
+    let mut buffer = vec![0u8; width_px * height as usize * 4];
+    let to_px = |value: i32| ((value + top_size) as f32 * scale).round() as i32;
+    let content_px = ((top_size + bottom_size) as f32 * scale).round() as i32;
+    let viewport_top = to_px(viewport.0);
+    let viewport_bottom = to_px(viewport.1);
+    let offset = if content_px <= height_px {
+        0
+    } else if edge_down {
+        (viewport_bottom - height_px).clamp(0, content_px - height_px)
+    } else {
+        viewport_top.clamp(0, content_px - height_px)
+    };
+
+    for segment in segments {
+        let segment_top = to_px(segment.top) - offset;
+        let copy_width = (segment.thumb.width() as usize).min(width_px);
+        for row in 0..segment.thumb.height() as i32 {
+            let destination_y = segment_top + row;
+            if destination_y < 0 || destination_y >= height_px {
+                continue;
+            }
+            let source = segment.thumb.as_raw();
+            let source_start = row as usize * segment.thumb.width() as usize * 4;
+            let destination_start = destination_y as usize * width_px * 4;
+            for x in 0..copy_width {
+                let s = source_start + x * 4;
+                let d = destination_start + x * 4;
+                buffer[d] = source[s + 2];
+                buffer[d + 1] = source[s + 1];
+                buffer[d + 2] = source[s];
+                buffer[d + 3] = 255;
+            }
+        }
+    }
+
+    for y in 0..height_px {
+        let stitch_y = y + offset;
+        if stitch_y >= viewport_top && stitch_y < viewport_bottom {
+            continue;
+        }
+        let row_start = y as usize * width_px * 4;
+        for x in 0..width_px {
+            let index = row_start + x * 4;
+            if buffer[index + 3] == 0 {
+                continue;
+            }
+            buffer[index] = (buffer[index] as u32 * EDGE_MASK_NUMERATOR / 255) as u8;
+            buffer[index + 1] = (buffer[index + 1] as u32 * EDGE_MASK_NUMERATOR / 255) as u8;
+            buffer[index + 2] = (buffer[index + 2] as u32 * EDGE_MASK_NUMERATOR / 255) as u8;
+        }
+    }
+
+    buffer
+}
+
+/// Places the strip beside the selection like the original (right of the
+/// selection, `marginXS` gap); falls back to the left edge when the monitor
+/// has no room on the right.
+fn strip_screen_x(
+    monitor_left: i32,
+    monitor_right: i32,
+    sel_left: i32,
+    sel_width: i32,
+    gap: i32,
+    strip_width: i32,
+) -> i32 {
+    let right_candidate = sel_left + sel_width + gap;
+    if right_candidate + strip_width <= monitor_right {
+        return right_candidate;
+    }
+    let left_candidate = sel_left - gap - strip_width;
+    if left_candidate >= monitor_left {
+        return left_candidate;
+    }
+    (monitor_right - strip_width).max(monitor_left)
+}
+
+fn ensure_overlay_class() -> Result<u16, String> {
+    OVERLAY_CLASS
+        .get_or_init(|| register_class(OVERLAY_CLASS_NAME, overlay_window_proc))
         .clone()
+}
+
+fn ensure_layered_class() -> Result<u16, String> {
+    LAYERED_CLASS
+        .get_or_init(|| register_class(LAYERED_CLASS_NAME, layered_window_proc))
+        .clone()
+}
+
+fn register_class(
+    name: PCWSTR,
+    proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+) -> Result<u16, String> {
+    let instance = module_instance()?;
+    let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
+        .map_err(|error| format!("无法加载长截图光标：{error}"))?;
+    let class = WNDCLASSW {
+        lpfnWndProc: Some(proc),
+        hInstance: instance,
+        hCursor: cursor,
+        lpszClassName: name,
+        ..Default::default()
+    };
+    let atom = unsafe { RegisterClassW(&class) };
+    if atom == 0 {
+        Err(format!(
+            "无法注册长截图窗口类：{}",
+            windows::core::Error::from_win32()
+        ))
+    } else {
+        Ok(atom)
+    }
 }
 
 fn module_instance() -> Result<HINSTANCE, String> {
@@ -364,57 +907,16 @@ fn module_instance() -> Result<HINSTANCE, String> {
     Ok(HINSTANCE(module.0))
 }
 
-fn tip_position(request: &ScrollCaptureRequest) -> Option<(i32, i32)> {
-    let region_left = request
-        .monitor_origin_x
-        .saturating_add(i32::try_from(request.region.x()).ok()?);
-    let region_top = request
-        .monitor_origin_y
-        .saturating_add(i32::try_from(request.region.y()).ok()?);
-    let region_bottom = region_top.saturating_add(i32::try_from(request.region.height()).ok()?);
-    let monitor_right = request
-        .monitor_origin_x
-        .saturating_add(i32::try_from(request.monitor_width).ok()?);
-    let monitor_bottom = request
-        .monitor_origin_y
-        .saturating_add(i32::try_from(request.monitor_height).ok()?);
-    let x = region_left
-        .min(monitor_right - TIP_WIDTH)
-        .max(request.monitor_origin_x);
-    if region_bottom + 8 + TIP_HEIGHT <= monitor_bottom {
-        Some((x, region_bottom + 8))
-    } else if region_top - 8 - TIP_HEIGHT >= request.monitor_origin_y {
-        Some((x, region_top - 8 - TIP_HEIGHT))
-    } else {
-        None
-    }
-}
-
 fn high_word_signed(value: u32) -> i16 {
     ((value >> 16) & 0xffff) as u16 as i16
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollCaptureRequest, high_word_signed, tip_position};
-    use crate::capture_workflow::FrozenRegionFrame;
-    use snow_shot_capture::PixelRect;
-
-    fn request(region: PixelRect) -> ScrollCaptureRequest {
-        ScrollCaptureRequest {
-            monitor_origin_x: -1920,
-            monitor_origin_y: 0,
-            monitor_width: 1920,
-            monitor_height: 1080,
-            initial_frame: FrozenRegionFrame::from_rgba(
-                region.width(),
-                region.height(),
-                vec![0; region.width() as usize * region.height() as usize * 4],
-            )
-            .unwrap(),
-            region,
-        }
-    }
+    use super::{
+        StripSegment, compose_strip, high_word_signed, rounded_rect_contains, strip_screen_x,
+    };
+    use image::RgbaImage;
 
     #[test]
     fn decodes_signed_wheel_delta() {
@@ -423,17 +925,45 @@ mod tests {
     }
 
     #[test]
-    fn places_tip_outside_selected_region() {
-        let bottom_space = request(PixelRect::new(100, 100, 800, 500).unwrap());
-        assert_eq!(tip_position(&bottom_space), Some((-1820, 608)));
-
-        let top_space = request(PixelRect::new(100, 700, 800, 360).unwrap());
-        assert_eq!(tip_position(&top_space), Some((-1820, 658)));
+    fn places_strip_right_of_selection_with_left_fallback() {
+        assert_eq!(strip_screen_x(0, 1920, 100, 800, 8, 160), 908);
+        assert_eq!(strip_screen_x(0, 1920, 1800, 100, 8, 160), 1632);
+        // Selection spanning the whole monitor pins the strip to the right edge.
+        assert_eq!(strip_screen_x(0, 1920, 0, 1920, 8, 160), 1760);
     }
 
     #[test]
-    fn omits_tip_when_selection_fills_monitor_height() {
-        let request = request(PixelRect::new(0, 0, 1920, 1080).unwrap());
-        assert_eq!(tip_position(&request), None);
+    fn rounded_rect_keeps_core_and_trims_corners() {
+        assert!(rounded_rect_contains(10, 0, 40, 20, 6));
+        assert!(rounded_rect_contains(0, 10, 40, 20, 6));
+        assert!(!rounded_rect_contains(0, 0, 40, 20, 6));
+        assert!(!rounded_rect_contains(39, 19, 40, 20, 6));
+    }
+
+    #[test]
+    fn compose_strip_masks_content_outside_viewport() {
+        let thumb = RgbaImage::from_pixel(4, 6, image::Rgba([200, 100, 50, 255]));
+        let segments = vec![StripSegment { top: 0, thumb }];
+        let buffer = compose_strip(&segments, 0, 6, (0, 3), false, 1.0, 4, 6);
+
+        // Inside the viewport: original colors in BGRA order, opaque.
+        assert_eq!(&buffer[0..4], &[50, 100, 200, 255]);
+        // Outside the viewport: dimmed to 68% brightness, still opaque.
+        let masked = &buffer[5 * 4 * 4..5 * 4 * 4 + 4];
+        assert_eq!(masked, &[34, 68, 136, 255]);
+        // Rows never covered by a segment stay fully transparent.
+        let empty = compose_strip(&[], 0, 6, (0, 3), false, 1.0, 4, 6);
+        assert!(empty.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn compose_strip_scrolls_to_active_edge() {
+        let thumb = RgbaImage::from_pixel(2, 8, image::Rgba([255, 255, 255, 255]));
+        let segments = vec![StripSegment { top: 0, thumb }];
+        // Content (8px) exceeds the 4px strip; scrolling down keeps the bottom
+        // edge of the viewport (stitch px 8) at the strip bottom.
+        let buffer = compose_strip(&segments, 0, 8, (4, 8), true, 1.0, 2, 4);
+        // Visible rows are stitch px 4..8 — all inside the viewport, unmasked.
+        assert!(buffer.chunks_exact(4).all(|px| px == [255, 255, 255, 255]));
     }
 }
