@@ -47,8 +47,12 @@ const SCREENSHOT_SHORTCUT: &str = "Alt+F12";
 const PIN_VISIBILITY_SHORTCUT: &str = "Alt+F11";
 const ESCAPE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const TOOLBAR_WIDTH: f32 = 884.0;
-const TOOLBAR_MAX_STACK_HEIGHT: f32 = 198.0;
+/// Toolbar height plus the inline group submenu that expands below it.
+const TOOLBAR_MAX_STACK_HEIGHT: f32 = 86.0;
 const TOOLBAR_VIEWPORT_MARGIN: f32 = 8.0;
+/// Side property panel geometry, matching `AnnotationPropertyPanel` in Slint.
+const PROPERTY_PANEL_WIDTH: f32 = 200.0;
+const PROPERTY_PANEL_MAX_HEIGHT: f32 = 430.0;
 #[cfg(test)]
 const PIN_MIN_WIDTH: f32 = 96.0;
 #[cfg(test)]
@@ -513,6 +517,33 @@ fn watch_capture_escape(capture_window: WeakCaptureWindow, session: SharedCaptur
     timer
 }
 
+/// Advances a floating element drag by the raw desktop cursor delta and clamps
+/// the result to the capture viewport. Returns the new logical position.
+fn advance_floating_drag(
+    state: &mut ToolbarDragState,
+    window_size: slint::PhysicalSize,
+    item_width: f32,
+    item_height: f32,
+) -> Option<(f32, f32)> {
+    let mut cursor = POINT::default();
+    // SAFETY: GetCursorPos writes the current desktop cursor into a valid POINT.
+    if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+        return None;
+    }
+    let logical_width = window_size.width as f32 / state.scale_factor;
+    let logical_height = window_size.height as f32 / state.scale_factor;
+    let max_x = (logical_width - item_width - TOOLBAR_VIEWPORT_MARGIN).max(TOOLBAR_VIEWPORT_MARGIN);
+    let max_y =
+        (logical_height - item_height - TOOLBAR_VIEWPORT_MARGIN).max(TOOLBAR_VIEWPORT_MARGIN);
+    state.x = (state.x + (cursor.x - state.cursor_x) as f32 / state.scale_factor)
+        .clamp(TOOLBAR_VIEWPORT_MARGIN, max_x);
+    state.y = (state.y + (cursor.y - state.cursor_y) as f32 / state.scale_factor)
+        .clamp(TOOLBAR_VIEWPORT_MARGIN, max_y);
+    state.cursor_x = cursor.x;
+    state.cursor_y = cursor.y;
+    Some((state.x, state.y))
+}
+
 fn bind_capture_callbacks(
     app: &AppWindow,
     capture: &CaptureWindow,
@@ -545,33 +576,67 @@ fn bind_capture_callbacks(
                 }
             }
             1 => {
-                let mut cursor = POINT::default();
-                // SAFETY: GetCursorPos writes the current desktop cursor into a valid POINT.
-                if unsafe { GetCursorPos(&mut cursor) }.is_err() {
-                    return;
-                }
                 let mut drag = toolbar_drag_state_for_callback.borrow_mut();
                 let Some(state) = drag.as_mut() else {
                     return;
                 };
-                let size = capture.window().size();
-                let logical_width = size.width as f32 / state.scale_factor;
-                let logical_height = size.height as f32 / state.scale_factor;
-                let max_x = (logical_width - TOOLBAR_WIDTH - TOOLBAR_VIEWPORT_MARGIN)
-                    .max(TOOLBAR_VIEWPORT_MARGIN);
-                let max_y = (logical_height - TOOLBAR_MAX_STACK_HEIGHT - TOOLBAR_VIEWPORT_MARGIN)
-                    .max(TOOLBAR_VIEWPORT_MARGIN);
-                state.x = (state.x + (cursor.x - state.cursor_x) as f32 / state.scale_factor)
-                    .clamp(TOOLBAR_VIEWPORT_MARGIN, max_x);
-                state.y = (state.y + (cursor.y - state.cursor_y) as f32 / state.scale_factor)
-                    .clamp(TOOLBAR_VIEWPORT_MARGIN, max_y);
-                state.cursor_x = cursor.x;
-                state.cursor_y = cursor.y;
-                capture.set_toolbar_position_x(state.x);
-                capture.set_toolbar_position_y(state.y);
+                let Some((x, y)) = advance_floating_drag(
+                    state,
+                    capture.window().size(),
+                    TOOLBAR_WIDTH,
+                    TOOLBAR_MAX_STACK_HEIGHT,
+                ) else {
+                    return;
+                };
+                capture.set_toolbar_position_x(x);
+                capture.set_toolbar_position_y(y);
             }
             _ => {
                 toolbar_drag_state_for_callback.borrow_mut().take();
+            }
+        }
+    });
+
+    let property_drag_state = Rc::new(RefCell::new(None::<ToolbarDragState>));
+    let property_drag_capture = capture.as_weak();
+    capture.on_property_drag_event(move |phase, item_x, item_y| {
+        let Some(capture) = property_drag_capture.upgrade() else {
+            return;
+        };
+        match phase {
+            0 => {
+                let mut cursor = POINT::default();
+                // SAFETY: GetCursorPos writes the current desktop cursor into a valid POINT.
+                if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+                    *property_drag_state.borrow_mut() = Some(ToolbarDragState {
+                        cursor_x: cursor.x,
+                        cursor_y: cursor.y,
+                        x: item_x,
+                        y: item_y,
+                        scale_factor: capture.window().scale_factor().max(0.1),
+                    });
+                    capture.set_property_position_x(item_x);
+                    capture.set_property_position_y(item_y);
+                }
+            }
+            1 => {
+                let mut drag = property_drag_state.borrow_mut();
+                let Some(state) = drag.as_mut() else {
+                    return;
+                };
+                let Some((x, y)) = advance_floating_drag(
+                    state,
+                    capture.window().size(),
+                    PROPERTY_PANEL_WIDTH,
+                    PROPERTY_PANEL_MAX_HEIGHT,
+                ) else {
+                    return;
+                };
+                capture.set_property_position_x(x);
+                capture.set_property_position_y(y);
+            }
+            _ => {
+                property_drag_state.borrow_mut().take();
             }
         }
     });

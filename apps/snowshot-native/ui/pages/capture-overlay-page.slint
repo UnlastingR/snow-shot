@@ -84,6 +84,7 @@ export component CaptureOverlayPage inherits Rectangle {
     callback cursor-nudge-requested(int, int);
     callback floating-position-changed(int, float, float);
     callback toolbar-drag-event(int, float, float);
+    callback property-drag-event(int, float, float);
     callback window-target-requested(float, float, float, float);
     callback element-mode-toggle-requested() -> bool;
     callback element-level-change-requested(int);
@@ -158,9 +159,9 @@ export component CaptureOverlayPage inherits Rectangle {
     private property <length> selection-bottom: max(root.anchor-y, root.cursor-y);
     private property <length> selection-width: root.selection-right - root.selection-left;
     private property <length> selection-height: root.selection-bottom - root.selection-top;
-    private property <length> toolbar-stack-height:
-        48px + 4px
-            + (property-panel.visible ? property-panel.height : 0px);
+    // The property panel is a separate side panel, so it no longer contributes
+    // to the main toolbar's vertical footprint.
+    private property <length> toolbar-stack-height: 48px;
     private property <bool> toolbar-auto-below:
         root.selection-bottom + root.toolbar-stack-height + SnowTheme.space-3 < root.height;
     private property <length> magnifier-x-primary:
@@ -292,6 +293,10 @@ export component CaptureOverlayPage inherits Rectangle {
                 root.toolbar-position-x = -1;
                 root.toolbar-position-y = -1;
             }
+            if (!root.property-dragging) {
+                root.property-position-x = -1;
+                root.property-position-y = -1;
+            }
             root.selection-animation-enabled = true;
             root.selection-animation-pending = true;
             root.anchor-x = 0px;
@@ -357,6 +362,10 @@ export component CaptureOverlayPage inherits Rectangle {
             root.toolbar-position-x = -1;
             root.toolbar-position-y = -1;
         }
+        if (!root.property-dragging) {
+            root.property-position-x = -1;
+            root.property-position-y = -1;
+        }
         root.selection-animation-enabled = false;
         root.selection-animation-pending = false;
         root.ocr-visible = false;
@@ -382,6 +391,10 @@ export component CaptureOverlayPage inherits Rectangle {
         if (!root.toolbar-dragging) {
             root.toolbar-position-x = -1;
             root.toolbar-position-y = -1;
+        }
+        if (!root.property-dragging) {
+            root.property-position-x = -1;
+            root.property-position-y = -1;
         }
     }
 
@@ -1099,20 +1112,41 @@ export component CaptureOverlayPage inherits Rectangle {
         visible: root.presentation-active && root.has-selection && root.annotation-visible
             && ((root.annotation-tool != 0 && root.annotation-tool != 7 && root.annotation-tool != 11)
                 || root.has-selected-element || root.ocr-available);
-        x: max(
-            SnowTheme.space-2,
-            min(
-                root.width - self.width - SnowTheme.space-2,
-                toolbar.x + (toolbar.width - self.width) / 2,
-            ),
-        );
-        y: max(
-            SnowTheme.space-2,
-            min(
-                root.height - self.height - SnowTheme.space-2,
-                toolbar.y + toolbar.height + 4px,
-            ),
-        );
+        // Mirrors the original project: the panel sits to the right of the
+        // selection and flips to the left when it would overflow the screen.
+        x: root.property-position-x >= 0
+            ? max(
+                SnowTheme.space-2,
+                min(root.width - self.width - SnowTheme.space-2, root.property-position-x * 1px),
+            )
+            : ((root.selection-right + self.width + SnowTheme.space-2 * 2) <= root.width)
+                ? root.selection-right + SnowTheme.space-2
+                : max(SnowTheme.space-2, root.selection-left - SnowTheme.space-2 - self.width);
+        y: root.property-position-y >= 0
+            ? max(
+                SnowTheme.space-2,
+                min(root.height - self.height - SnowTheme.space-2, root.property-position-y * 1px),
+            )
+            : max(
+                SnowTheme.space-2,
+                min(root.height - self.height - SnowTheme.space-2, root.selection-top),
+            );
+        drag-began => {
+            root.property-dragging = true;
+            root.property-drag-event(0, self.x / 1px, self.y / 1px);
+        }
+        drag-moved => {
+            if (root.property-dragging) {
+                root.property-drag-event(1, 0, 0);
+            }
+        }
+        drag-ended => {
+            if (root.property-dragging) {
+                root.property-dragging = false;
+                root.property-drag-event(2, 0, 0);
+            }
+            keyboard-focus.focus();
+        }
         active-tool: root.annotation-tool;
         has-selected-element: root.has-selected-element;
         stroke-color: root.style-stroke-color;

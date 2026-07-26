@@ -1,160 +1,125 @@
 import { LineEdit, Slider, SpinBox } from "std-widgets.slint";
 import { SnowTheme } from "../theme/snow-theme.slint";
 
-component SmallButton inherits Rectangle {
+// Layout mirrors the original project's `App-menu__left` / `selected-shape-actions`
+// panel: a 200px wide vertical column of labelled sections, 12px padding and a
+// 12px gap between sections.
+component PanelLabel inherits Text {
+    color: #595959;
+    font-size: 12px;
+    height: 16px;
+    vertical-alignment: center;
+}
+
+component Swatch inherits Rectangle {
+    in property <color> swatch;
+    in property <bool> active: false;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    border-width: root.active ? 2px : 1px;
+    border-color: root.active ? #1677ff : area.has-hover ? #1677ff : #d9d9d9;
+    background: root.swatch;
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component PanelButton inherits Rectangle {
     in property <string> label;
     in property <bool> selected: false;
     callback clicked();
-    width: 42px;
-    height: 26px;
-    border-radius: SnowTheme.radius-sm;
-    border-width: root.selected ? 1px : 0px;
-    border-color: #1677ff;
+    height: 28px;
+    border-radius: SnowTheme.radius-xs;
+    border-width: 1px;
+    border-color: root.selected ? #1677ff : #e2e2de;
     background: root.selected ? #e6f4ff
-        : area.pressed ? #d6e4ff : area.has-hover ? #f0f5ff : #f5f5f5;
+        : area.pressed ? #d6e4ff
+        : area.has-hover ? #f0f5ff
+        : #fafafa;
     Text {
         text: root.label;
-        color: #262626;
+        color: root.selected ? #0958d9 : #262626;
         font-size: 11px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    area := TouchArea { clicked => { root.clicked(); } }
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
-component ColorPreset inherits Rectangle {
-    in property <color> swatch;
+component LayerButton inherits Rectangle {
+    in property <int> kind: 0;
     callback clicked();
-    width: 22px;
-    height: 22px;
-    border-radius: 5px;
+    height: 28px;
+    border-radius: SnowTheme.radius-xs;
     border-width: 1px;
-    border-color: area.has-hover ? #1677ff : #bfbfbf;
-    background: root.swatch;
-    area := TouchArea { clicked => { root.clicked(); } }
-}
+    border-color: #e2e2de;
+    background: area.pressed ? #d6e4ff : area.has-hover ? #f0f5ff : #fafafa;
 
-component ColorField inherits Rectangle {
-    in property <string> label;
-    in property <color> swatch;
-    in-out property <string> value;
-    callback submitted(string);
-    callback selected();
-    callback input-focus-changed(bool);
-    width: 150px;
-    height: 30px;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands:
+            root.kind == 0 ? "M 12 3 V 14 M 8 10 L 12 14 L 16 10 M 4 20 H 20"
+            : root.kind == 1 ? "M 12 5 V 16 M 8 12 L 12 16 L 16 12"
+            : root.kind == 2 ? "M 12 19 V 8 M 8 12 L 12 8 L 16 12"
+            : root.kind == 3 ? "M 12 21 V 10 M 8 14 L 12 10 L 16 14 M 4 4 H 20"
+            : "M 5 7 H 19 M 10 7 V 4 H 14 V 7 M 7 7 L 8 20 H 16 L 17 7";
+        fill: transparent;
+        stroke: root.kind == 4 ? #c94c4c : #262626;
+        stroke-width: 1.7px;
+    }
 
-    Text {
-        width: 30px;
-        text: root.label;
-        color: #595959;
-        font-size: 11px;
-        vertical-alignment: center;
-    }
-    Rectangle {
-        x: 12px;
-        y: 5px;
-        width: 20px;
-        height: 20px;
-        border-radius: 4px;
-        border-width: 1px;
-        border-color: #d9d9d9;
-        background: root.swatch;
-        TouchArea { clicked => { root.selected(); } }
-    }
-    edit := LineEdit {
-        x: 56px;
-        y: 1px;
-        width: 92px;
-        height: 28px;
-        text <=> root.value;
-        accepted => { root.submitted(self.text); }
-        changed has-focus => {
-            root.input-focus-changed(self.has-focus);
-            if (self.has-focus) {
-                root.selected();
-            }
-        }
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
-component NumericControl inherits Rectangle {
-    in property <string> label;
-    in property <float> value;
-    in property <float> minimum;
-    in property <float> maximum;
-    callback changed(float);
-    width: 204px;
-    height: 38px;
-
-    Text {
-        x: 0px;
-        y: 0px;
-        width: 144px;
-        height: 12px;
-        text: root.label;
-        color: #595959;
-        font-size: 10px;
-        vertical-alignment: center;
-    }
-    Slider {
-        x: 0px;
-        y: 13px;
-        width: 144px;
-        height: 24px;
-        minimum: root.minimum;
-        maximum: root.maximum;
-        value: root.value;
-        changed(value) => { root.changed(value); }
-    }
-    Rectangle {
-        x: 154px;
-        y: 13px;
-        width: 48px;
-        height: 24px;
-        border-radius: 4px;
-        border-width: 1px;
-        border-color: #d9d9d9;
-        background: white;
-
-        Text {
-            text: round(root.value);
-            color: #262626;
-            font-size: 10px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-}
-
-component NumericInput inherits Rectangle {
+// Slider paired with a numeric input, matching the original `ChangeStrokeWidthSlider`
+// (antd `Slider` with `flex: 1` next to a 52px `InputNumber`).
+component SliderField inherits VerticalLayout {
     in property <string> label;
     in property <float> value;
     in property <int> minimum;
     in property <int> maximum;
+    in property <bool> show-input: true;
     callback changed(float);
     callback input-focus-changed(bool);
-    width: 176px;
-    height: 34px;
-    Text {
-        width: 42px;
-        text: root.label;
-        color: #595959;
-        font-size: 10px;
-        vertical-alignment: center;
-    }
-    input := SpinBox {
-        x: 44px;
-        y: 2px;
-        width: 128px;
+    spacing: 4px;
+
+    PanelLabel { text: root.label; }
+
+    HorizontalLayout {
+        spacing: 8px;
         height: 30px;
-        minimum: root.minimum;
-        maximum: root.maximum;
-        value: root.value;
-        edited(value) => { root.changed(value); }
-        changed has-focus => { root.input-focus-changed(self.has-focus); }
+        Slider {
+            horizontal-stretch: 1;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            value: root.value;
+            changed(value) => { root.changed(value); }
+        }
+        if root.show-input : SpinBox {
+            width: 56px;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            value: root.value;
+            edited(value) => { root.changed(value); }
+            changed has-focus => { root.input-focus-changed(self.has-focus); }
+        }
     }
 }
+
 export component AnnotationPropertyPanel inherits Rectangle {
     in property <int> active-tool: 0;
     in property <bool> has-selected-element: false;
@@ -190,8 +155,8 @@ export component AnnotationPropertyPanel inherits Rectangle {
     callback ocr-copy-requested();
     callback ocr-visibility-requested(bool);
     callback ocr-auto-color-requested();
-    callback drag-began(float, float, float, float);
-    callback drag-moved(float, float);
+    callback drag-began();
+    callback drag-moved();
     callback drag-ended();
     callback input-focus-changed(bool);
 
@@ -200,7 +165,8 @@ export component AnnotationPropertyPanel inherits Rectangle {
         : root.active-color-slot == 2 ? root.text-color.alpha / 2.55
         : root.stroke-color.alpha / 2.55;
     private property <int> effective-tool:
-        (root.active-tool == 0 || root.active-tool == 7 || root.active-tool == 11) && root.selected-annotation-tool != 0
+        (root.active-tool == 0 || root.active-tool == 7 || root.active-tool == 11)
+            && root.selected-annotation-tool != 0
             ? root.selected-annotation-tool
             : root.active-tool;
     private property <bool> is-shape:
@@ -214,8 +180,20 @@ export component AnnotationPropertyPanel inherits Rectangle {
     private property <bool> is-text: root.effective-tool == 13;
     private property <bool> is-serial: root.effective-tool == 4;
 
-    width: 840px;
-    height: root.is-text ? 146px : 112px;
+    private property <bool> show-stroke-color:
+        !root.ocr-selected && (root.is-shape || root.is-line || root.is-pen || root.is-serial);
+    private property <bool> show-fill-color:
+        !root.ocr-selected && (root.is-shape || root.is-serial);
+    private property <bool> show-text-color:
+        root.ocr-selected || root.is-text || root.is-serial;
+    private property <bool> show-any-color:
+        root.show-stroke-color || root.show-fill-color || root.show-text-color;
+    private property <bool> show-opacity:
+        root.ocr-selected || (root.effective-tool != 0 && root.effective-tool != 7
+            && root.effective-tool != 11);
+
+    width: 200px;
+    height: body.preferred-height;
     border-radius: SnowTheme.radius-md;
     border-width: 1px;
     border-color: #d9d9d9;
@@ -224,342 +202,330 @@ export component AnnotationPropertyPanel inherits Rectangle {
     drop-shadow-blur: 10px;
     drop-shadow-offset-y: 3px;
 
+    body := VerticalLayout {
+        padding: 12px;
+        spacing: 12px;
 
-    VerticalLayout {
-        visible: !root.ocr-selected;
-        x: 12px;
-        y: 6px;
-        width: parent.width - 24px;
-        height: parent.height - 12px;
-        spacing: 2px;
+        // Drag handle, mirroring the original panel's top holder bar.
+        Rectangle {
+            height: 16px;
+            border-radius: SnowTheme.radius-xs;
+            background: handle-area.has-hover ? #f0f5ff : transparent;
 
-        HorizontalLayout {
-            spacing: 4px;
-            ColorField {
-                visible: !root.ocr-selected
-                    && (root.is-shape || root.is-line || root.is-pen || root.is-serial);
-                label: "线";
-                swatch: root.stroke-color;
-                value <=> root.stroke-hex;
-                submitted(value) => { root.color-submitted(0, value); }
-                selected => { root.active-color-slot = 0; }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            for dot[index] in 12 : Rectangle {
+                x: (parent.width - 40px) / 2 + mod(index, 6) * 7px;
+                y: (parent.height - 9px) / 2 + floor(index / 6) * 6px;
+                width: 3px;
+                height: 3px;
+                border-radius: 2px;
+                background: handle-area.has-hover ? #1677ff : #a6a6a6;
             }
-            ColorField {
-                visible: !root.ocr-selected
-                    && (root.is-shape || root.is-serial || root.is-text);
-                label: "填";
-                swatch: root.fill-color;
-                value <=> root.fill-hex;
-                submitted(value) => { root.color-submitted(1, value); }
-                selected => { root.active-color-slot = 1; }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
-            }
-            ColorField {
-                visible: root.ocr-selected || root.is-serial || root.is-text;
-                label: "字";
-                swatch: root.text-color;
-                value <=> root.text-hex;
-                submitted(value) => { root.color-submitted(2, value); }
-                selected => { root.active-color-slot = 2; }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
-            }
-            SmallButton {
-                width: 50px;
-                visible: !root.ocr-selected && root.is-text;
-                label: root.bold ? "粗体✓" : "粗体";
-                selected: root.bold;
-                clicked => { root.style-value-changed(5, root.bold ? 0 : 1); }
-            }
-            SmallButton {
-                width: 34px;
-                visible: !root.ocr-selected && root.is-text;
-                label: "左";
-                selected: root.text-alignment == 0;
-                clicked => { root.style-value-changed(6, 0); }
-            }
-            SmallButton {
-                width: 34px;
-                visible: !root.ocr-selected && root.is-text;
-                label: "中";
-                selected: root.text-alignment == 1;
-                clicked => { root.style-value-changed(6, 1); }
-            }
-            SmallButton {
-                width: 34px;
-                visible: !root.ocr-selected && root.is-text;
-                label: "右";
-                selected: root.text-alignment == 2;
-                clicked => { root.style-value-changed(6, 2); }
-            }
-            SmallButton {
-                width: 54px;
-                visible: root.ocr-available;
-                label: root.ocr-visible ? "隐藏OCR" : "显示OCR";
-                clicked => { root.ocr-visibility-requested(!root.ocr-visible); }
-            }
-            SmallButton {
-                width: 62px;
-                visible: root.ocr-available;
-                label: "复制文字";
-                clicked => { root.ocr-copy-requested(); }
-            }
-            SmallButton {
-                width: 54px;
-                visible: root.ocr-selected;
-                label: "自动色";
-                selected: !root.ocr-manual-color;
-                clicked => { root.ocr-auto-color-requested(); }
+
+            handle-area := TouchArea {
+                mouse-cursor: move;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down
+                            && event.button == PointerEventButton.left) {
+                        root.drag-began();
+                    } else if (event.kind == PointerEventKind.move && self.pressed) {
+                        root.drag-moved();
+                    } else if (event.kind == PointerEventKind.up
+                            || event.kind == PointerEventKind.cancel) {
+                        root.drag-ended();
+                    }
+                }
             }
         }
 
-        HorizontalLayout {
-            spacing: 2px;
-            NumericControl {
-                visible: root.is-shape || root.is-line || root.is-pen;
-                label: "线宽";
-                value: root.stroke-width;
-                minimum: 1;
-                maximum: 32;
-                changed(value) => { root.style-value-changed(0, value); }
+        if root.show-stroke-color : VerticalLayout {
+            spacing: 4px;
+            PanelLabel { text: "描边"; }
+            HorizontalLayout {
+                spacing: 6px;
+                height: 24px;
+                Swatch {
+                    swatch: #1e1e1e;
+                    clicked => { root.active-color-slot = 0; root.color-submitted(0, "#1E1E1E"); }
+                }
+                Swatch {
+                    swatch: #f5222d;
+                    clicked => { root.active-color-slot = 0; root.color-submitted(0, "#F5222D"); }
+                }
+                Swatch {
+                    swatch: #52c41a;
+                    clicked => { root.active-color-slot = 0; root.color-submitted(0, "#52C41A"); }
+                }
+                Swatch {
+                    swatch: #1677ff;
+                    clicked => { root.active-color-slot = 0; root.color-submitted(0, "#1677FF"); }
+                }
+                Swatch {
+                    swatch: #faad14;
+                    clicked => { root.active-color-slot = 0; root.color-submitted(0, "#FAAD14"); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Swatch {
+                    swatch: root.stroke-color;
+                    active: root.active-color-slot == 0;
+                    clicked => { root.active-color-slot = 0; }
+                }
             }
-            NumericControl {
-                visible: (root.effective-tool != 0 && root.effective-tool != 11)
-                    || root.ocr-selected;
-                label: "透明";
-                value: root.opacity-percent;
-                minimum: 0;
-                maximum: 100;
-                changed(value) => { root.style-value-changed(1, value); }
-            }
-            NumericControl {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                label: "色透";
-                value: root.active-color-alpha;
-                minimum: 0;
-                maximum: 100;
-                changed(value) => { root.color-alpha-changed(root.active-color-slot, value); }
-            }
-            NumericInput {
-                visible: root.is-pen || root.is-effect;
-                label: "笔刷大小";
-                value: root.brush-size;
-                minimum: 2;
-                maximum: 128;
-                changed(value) => { root.style-value-changed(2, value); }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
-            }
-            NumericControl {
-                visible: root.is-effect || root.ocr-selected;
-                label: "强度";
-                value: root.effect-strength;
-                minimum: 5;
-                maximum: 100;
-                changed(value) => { root.style-value-changed(3, value); }
-            }
-            NumericInput {
-                visible: root.is-text || root.is-serial;
-                label: "字号";
-                value: root.font-size;
-                minimum: 8;
-                maximum: 128;
-                changed(value) => { root.style-value-changed(4, value); }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            LineEdit {
+                height: 28px;
+                text <=> root.stroke-hex;
+                accepted(value) => { root.color-submitted(0, value); }
+                changed has-focus => {
+                    root.input-focus-changed(self.has-focus);
+                    if (self.has-focus) { root.active-color-slot = 0; }
+                }
             }
         }
 
-        HorizontalLayout {
+        if root.show-fill-color : VerticalLayout {
             spacing: 4px;
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #e84444;
-                clicked => { root.color-submitted(root.active-color-slot, "#E84444"); }
+            PanelLabel { text: "背景"; }
+            HorizontalLayout {
+                spacing: 6px;
+                height: 24px;
+                Swatch {
+                    swatch: transparent;
+                    clicked => { root.active-color-slot = 1; root.color-submitted(1, "#00000000"); }
+                }
+                Swatch {
+                    swatch: #ffccc7;
+                    clicked => { root.active-color-slot = 1; root.color-submitted(1, "#FFCCC7"); }
+                }
+                Swatch {
+                    swatch: #d9f7be;
+                    clicked => { root.active-color-slot = 1; root.color-submitted(1, "#D9F7BE"); }
+                }
+                Swatch {
+                    swatch: #bae0ff;
+                    clicked => { root.active-color-slot = 1; root.color-submitted(1, "#BAE0FF"); }
+                }
+                Swatch {
+                    swatch: #fff1b8;
+                    clicked => { root.active-color-slot = 1; root.color-submitted(1, "#FFF1B8"); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Swatch {
+                    swatch: root.fill-color;
+                    active: root.active-color-slot == 1;
+                    clicked => { root.active-color-slot = 1; }
+                }
             }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #ff8a00;
-                clicked => { root.color-submitted(root.active-color-slot, "#FF8A00"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #ffd60a;
-                clicked => { root.color-submitted(root.active-color-slot, "#FFD60A"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #1eb980;
-                clicked => { root.color-submitted(root.active-color-slot, "#1EB980"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #168cde;
-                clicked => { root.color-submitted(root.active-color-slot, "#168CDE"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #7b61ff;
-                clicked => { root.color-submitted(root.active-color-slot, "#7B61FF"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #ffffff;
-                clicked => { root.color-submitted(root.active-color-slot, "#FFFFFF"); }
-            }
-            ColorPreset {
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                swatch: #111111;
-                clicked => { root.color-submitted(root.active-color-slot, "#111111"); }
-            }
-            Text {
-                horizontal-stretch: 1;
-                visible: root.ocr-selected || root.is-shape || root.is-line
-                    || root.is-pen || root.is-serial || root.is-text;
-                text: root.is-serial
-                    ? "本次截图自动编号：" + round(root.serial-number)
-                    : "颜色槽支持 HEX / RGB / HSV 输入和独立透明度";
-                color: #8c8c8c;
-                font-size: 10px;
-                vertical-alignment: center;
-            }
-            SmallButton {
-                visible: root.has-selected-element;
-                label: "置底";
-                clicked => { root.layer-requested(0); }
-            }
-            SmallButton {
-                visible: root.has-selected-element;
-                label: "下移";
-                clicked => { root.layer-requested(1); }
-            }
-            SmallButton {
-                visible: root.has-selected-element;
-                label: "上移";
-                clicked => { root.layer-requested(2); }
-            }
-            SmallButton {
-                visible: root.has-selected-element;
-                label: "置顶";
-                clicked => { root.layer-requested(3); }
-            }
-            SmallButton {
-                visible: root.has-selected-element && !root.ocr-selected;
-                label: "删除";
-                clicked => { root.delete-requested(); }
+            LineEdit {
+                height: 28px;
+                text <=> root.fill-hex;
+                accepted(value) => { root.color-submitted(1, value); }
+                changed has-focus => {
+                    root.input-focus-changed(self.has-focus);
+                    if (self.has-focus) { root.active-color-slot = 1; }
+                }
             }
         }
 
-        HorizontalLayout {
-            visible: root.is-text;
+        if root.show-text-color : VerticalLayout {
             spacing: 4px;
-            Text {
-                width: 28px;
-                text: "文本";
-                color: #595959;
-                font-size: 11px;
-                vertical-alignment: center;
+            PanelLabel { text: "文字颜色"; }
+            HorizontalLayout {
+                spacing: 6px;
+                height: 24px;
+                Swatch {
+                    swatch: #1e1e1e;
+                    clicked => { root.active-color-slot = 2; root.color-submitted(2, "#1E1E1E"); }
+                }
+                Swatch {
+                    swatch: #ffffff;
+                    clicked => { root.active-color-slot = 2; root.color-submitted(2, "#FFFFFF"); }
+                }
+                Swatch {
+                    swatch: #f5222d;
+                    clicked => { root.active-color-slot = 2; root.color-submitted(2, "#F5222D"); }
+                }
+                Swatch {
+                    swatch: #1677ff;
+                    clicked => { root.active-color-slot = 2; root.color-submitted(2, "#1677FF"); }
+                }
+                Swatch {
+                    swatch: #faad14;
+                    clicked => { root.active-color-slot = 2; root.color-submitted(2, "#FAAD14"); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Swatch {
+                    swatch: root.text-color;
+                    active: root.active-color-slot == 2;
+                    clicked => { root.active-color-slot = 2; }
+                }
             }
-            text-edit := LineEdit {
-                horizontal-stretch: 1;
+            LineEdit {
+                height: 28px;
+                text <=> root.text-hex;
+                accepted(value) => { root.color-submitted(2, value); }
+                changed has-focus => {
+                    root.input-focus-changed(self.has-focus);
+                    if (self.has-focus) { root.active-color-slot = 2; }
+                }
+            }
+        }
+
+        if root.show-any-color : SliderField {
+            label: "颜色不透明度";
+            value: root.active-color-alpha;
+            minimum: 0;
+            maximum: 100;
+            show-input: false;
+            changed(value) => { root.color-alpha-changed(root.active-color-slot, value); }
+        }
+
+        if !root.ocr-selected && (root.is-shape || root.is-line || root.is-pen) : SliderField {
+            label: "线条宽度";
+            value: root.stroke-width;
+            minimum: 1;
+            maximum: 32;
+            changed(value) => { root.style-value-changed(0, value); }
+            input-focus-changed(focused) => { root.input-focus-changed(focused); }
+        }
+
+        if !root.ocr-selected && (root.is-text || root.is-serial) : SliderField {
+            label: "字号";
+            value: root.font-size;
+            minimum: 8;
+            maximum: 128;
+            changed(value) => { root.style-value-changed(4, value); }
+            input-focus-changed(focused) => { root.input-focus-changed(focused); }
+        }
+
+        if !root.ocr-selected && (root.is-pen || root.is-effect) : SliderField {
+            label: "笔刷大小";
+            value: root.brush-size;
+            minimum: 2;
+            maximum: 128;
+            changed(value) => { root.style-value-changed(2, value); }
+            input-focus-changed(focused) => { root.input-focus-changed(focused); }
+        }
+
+        if root.ocr-selected || root.is-effect : SliderField {
+            label: root.ocr-selected ? "模糊强度" : "强度";
+            value: root.effect-strength;
+            minimum: 5;
+            maximum: 100;
+            changed(value) => { root.style-value-changed(3, value); }
+            input-focus-changed(focused) => { root.input-focus-changed(focused); }
+        }
+
+        if root.show-opacity : SliderField {
+            label: "不透明度";
+            value: root.opacity-percent;
+            minimum: 0;
+            maximum: 100;
+            show-input: false;
+            changed(value) => { root.style-value-changed(1, value); }
+        }
+
+        if !root.ocr-selected && root.is-text : VerticalLayout {
+            spacing: 4px;
+            PanelLabel { text: "字体"; }
+            HorizontalLayout {
+                spacing: 6px;
+                PanelButton {
+                    width: 41px;
+                    label: "粗体";
+                    selected: root.bold;
+                    clicked => { root.style-value-changed(5, root.bold ? 0 : 1); }
+                }
+                PanelButton {
+                    width: 41px;
+                    label: "左";
+                    selected: root.text-alignment == 0;
+                    clicked => { root.style-value-changed(6, 0); }
+                }
+                PanelButton {
+                    width: 41px;
+                    label: "中";
+                    selected: root.text-alignment == 1;
+                    clicked => { root.style-value-changed(6, 1); }
+                }
+                PanelButton {
+                    width: 41px;
+                    label: "右";
+                    selected: root.text-alignment == 2;
+                    clicked => { root.style-value-changed(6, 2); }
+                }
+            }
+        }
+
+        if !root.ocr-selected && root.is-text : VerticalLayout {
+            spacing: 4px;
+            PanelLabel { text: "文本"; }
+            LineEdit {
+                height: 28px;
                 text <=> root.selected-text;
-                accepted => { root.text-submitted(self.text); }
+                accepted(value) => { root.text-submitted(value); }
                 changed has-focus => { root.input-focus-changed(self.has-focus); }
             }
         }
 
-
-    }
-
-    if root.ocr-selected : VerticalLayout {
-        x: 12px;
-        y: 6px;
-        width: parent.width - 24px;
-        height: parent.height - 12px;
-        spacing: 4px;
-
-        HorizontalLayout {
-            spacing: 6px;
-            ColorField {
-                label: "字";
-                swatch: root.text-color;
-                value <=> root.text-hex;
-                submitted(value) => { root.color-submitted(2, value); }
-                selected => { root.active-color-slot = 2; }
-                input-focus-changed(focused) => { root.input-focus-changed(focused); }
-            }
-            SmallButton {
-                width: 54px;
-                label: root.ocr-visible ? "隐藏OCR" : "显示OCR";
-                clicked => { root.ocr-visibility-requested(!root.ocr-visible); }
-            }
-            SmallButton {
-                width: 62px;
-                label: "复制文字";
-                clicked => { root.ocr-copy-requested(); }
-            }
-            SmallButton {
-                width: 54px;
-                label: "自动色";
-                selected: !root.ocr-manual-color;
-                clicked => { root.ocr-auto-color-requested(); }
-            }
-            Rectangle { horizontal-stretch: 1; }
+        if !root.ocr-selected && root.is-serial : PanelLabel {
+            text: "本次截图编号：" + round(root.serial-number);
+            color: #8c8c8c;
         }
 
-        HorizontalLayout {
-            spacing: 10px;
-            NumericControl {
-                label: "透明";
-                value: root.opacity-percent;
-                minimum: 0;
-                maximum: 100;
-                changed(value) => { root.style-value-changed(1, value); }
-            }
-            NumericControl {
-                label: "色透";
-                value: root.active-color-alpha;
-                minimum: 0;
-                maximum: 100;
-                changed(value) => { root.color-alpha-changed(2, value); }
-            }
-            NumericControl {
-                label: "模糊";
-                value: root.effect-strength;
-                minimum: 5;
-                maximum: 100;
-                changed(value) => { root.style-value-changed(3, value); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        HorizontalLayout {
+        if root.ocr-available : VerticalLayout {
             spacing: 4px;
-            ColorPreset { swatch: #e84444; clicked => { root.color-submitted(2, "#E84444"); } }
-            ColorPreset { swatch: #ff8a00; clicked => { root.color-submitted(2, "#FF8A00"); } }
-            ColorPreset { swatch: #ffd60a; clicked => { root.color-submitted(2, "#FFD60A"); } }
-            ColorPreset { swatch: #1eb980; clicked => { root.color-submitted(2, "#1EB980"); } }
-            ColorPreset { swatch: #168cde; clicked => { root.color-submitted(2, "#168CDE"); } }
-            ColorPreset { swatch: #7b61ff; clicked => { root.color-submitted(2, "#7B61FF"); } }
-            ColorPreset { swatch: #ffffff; clicked => { root.color-submitted(2, "#FFFFFF"); } }
-            ColorPreset { swatch: #111111; clicked => { root.color-submitted(2, "#111111"); } }
-            Text {
-                horizontal-stretch: 1;
-                text: "OCR 文字层";
-                color: #8c8c8c;
-                font-size: 10px;
-                vertical-alignment: center;
+            PanelLabel { text: "OCR"; }
+            HorizontalLayout {
+                spacing: 6px;
+                PanelButton {
+                    horizontal-stretch: 1;
+                    label: root.ocr-visible ? "隐藏" : "显示";
+                    clicked => { root.ocr-visibility-requested(!root.ocr-visible); }
+                }
+                PanelButton {
+                    horizontal-stretch: 1;
+                    label: "复制文字";
+                    clicked => { root.ocr-copy-requested(); }
+                }
+                if root.ocr-selected : PanelButton {
+                    horizontal-stretch: 1;
+                    label: "自动色";
+                    selected: !root.ocr-manual-color;
+                    clicked => { root.ocr-auto-color-requested(); }
+                }
             }
-            SmallButton { label: "置底"; clicked => { root.layer-requested(0); } }
-            SmallButton { label: "下移"; clicked => { root.layer-requested(1); } }
-            SmallButton { label: "上移"; clicked => { root.layer-requested(2); } }
-            SmallButton { label: "置顶"; clicked => { root.layer-requested(3); } }
         }
-    }}
+
+        if root.has-selected-element : VerticalLayout {
+            spacing: 4px;
+            PanelLabel { text: "图层"; }
+            HorizontalLayout {
+                spacing: 6px;
+                LayerButton {
+                    horizontal-stretch: 1;
+                    kind: 0;
+                    clicked => { root.layer-requested(0); }
+                }
+                LayerButton {
+                    horizontal-stretch: 1;
+                    kind: 1;
+                    clicked => { root.layer-requested(1); }
+                }
+                LayerButton {
+                    horizontal-stretch: 1;
+                    kind: 2;
+                    clicked => { root.layer-requested(2); }
+                }
+                LayerButton {
+                    horizontal-stretch: 1;
+                    kind: 3;
+                    clicked => { root.layer-requested(3); }
+                }
+                if !root.ocr-selected : LayerButton {
+                    horizontal-stretch: 1;
+                    kind: 4;
+                    clicked => { root.delete-requested(); }
+                }
+            }
+        }
+    }
+}
