@@ -1,4 +1,4 @@
-import { LineEdit, Slider, SpinBox } from "std-widgets.slint";
+import { LineEdit, Slider } from "std-widgets.slint";
 import { SnowTheme } from "../theme/snow-theme.slint";
 
 // Layout mirrors the original project's `App-menu__left` / `selected-shape-actions`
@@ -85,6 +85,104 @@ component LayerButton inherits Rectangle {
     }
 }
 
+// Compact numeric input matching antd `InputNumber`: a 56px text field with a
+// column of small stacked up/down steppers on the right. The std SpinBox cannot
+// be used here — its fluent style has a 128px min-width (two 28px side-by-side
+// buttons) and overflows the 200px panel.
+component NumberInput inherits Rectangle {
+    in property <float> value;
+    in property <int> minimum;
+    in property <int> maximum;
+    callback changed(float);
+    callback focus-changed(bool);
+    property <int> display-value: Math.round(root.value);
+
+    function commit-text() {
+        if (input.text.is-float()) {
+            root.changed(Math.max(root.minimum, Math.min(root.maximum, input.text.to-float())));
+        }
+        input.text = root.display-value;
+    }
+    function step(delta: int) {
+        root.changed(Math.max(root.minimum, Math.min(root.maximum, root.display-value + delta)));
+    }
+
+    changed value => {
+        if (!input.has-focus) { input.text = root.display-value; }
+    }
+
+    width: 56px;
+    height: 30px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? #1677ff : #d9d9d9;
+    background: white;
+
+    HorizontalLayout {
+        Rectangle {
+            clip: true;
+            input := TextInput {
+                x: 8px;
+                width: parent.width - 10px;
+                height: 100%;
+                vertical-alignment: center;
+                font-size: 13px;
+                color: #262626;
+                single-line: true;
+                input-type: number;
+                text: root.display-value;
+                accepted => { self.clear-focus(); }
+                changed has-focus => {
+                    root.focus-changed(self.has-focus);
+                    if (!self.has-focus) { root.commit-text(); }
+                }
+            }
+        }
+        Rectangle {
+            width: 17px;
+            Rectangle { x: 0; width: 1px; height: parent.height; background: #f0f0f0; }
+            VerticalLayout {
+                padding-left: 1px;
+                Rectangle {
+                    background: up-area.has-hover ? #f5f5f5 : transparent;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M 6 15 L 12 9 L 18 15";
+                        fill: transparent;
+                        stroke: up-area.has-hover ? #1677ff : #8c8c8c;
+                        stroke-width: 2.4px;
+                    }
+                    up-area := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.step(1); }
+                    }
+                }
+                Rectangle { height: 1px; background: #f0f0f0; }
+                Rectangle {
+                    background: down-area.has-hover ? #f5f5f5 : transparent;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M 6 9 L 12 15 L 18 9";
+                        fill: transparent;
+                        stroke: down-area.has-hover ? #1677ff : #8c8c8c;
+                        stroke-width: 2.4px;
+                    }
+                    down-area := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.step(-1); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Slider paired with a numeric input, matching the original `ChangeStrokeWidthSlider`
 // (antd `Slider` with `flex: 1` next to a 52px `InputNumber`).
 component SliderField inherits VerticalLayout {
@@ -109,13 +207,12 @@ component SliderField inherits VerticalLayout {
             value: root.value;
             changed(value) => { root.changed(value); }
         }
-        if root.show-input : SpinBox {
-            width: 56px;
+        if root.show-input : NumberInput {
             minimum: root.minimum;
             maximum: root.maximum;
             value: root.value;
-            edited(value) => { root.changed(value); }
-            changed has-focus => { root.input-focus-changed(self.has-focus); }
+            changed(value) => { root.changed(value); }
+            focus-changed(focus) => { root.input-focus-changed(focus); }
         }
     }
 }
