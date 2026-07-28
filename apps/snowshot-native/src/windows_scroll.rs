@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -24,18 +26,19 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, IDC_ARROW, LoadCursorW, MSG, MSLLHOOKSTRUCT, PM_REMOVE, PeekMessageW,
-    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    ULW_ALPHA, UnhookWindowsHookEx, UpdateLayeredWindow, WH_MOUSE_LL, WM_ERASEBKGND, WM_MOUSEWHEEL,
-    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    GetClientRect, GetCursorPos, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, MSLLHOOKSTRUCT, PM_REMOVE,
+    PeekMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, ULW_ALPHA, UnhookWindowsHookEx, UpdateLayeredWindow, WH_MOUSE_LL,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::capture_workflow::{FrozenRegionFrame, capture_live_region};
+use crate::capture_workflow::{FrozenRegionFrame, capture_live_region, save_region_frame_to_path};
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("SnowShotScrollCaptureOverlay");
 const LAYERED_CLASS_NAME: PCWSTR = w!("SnowShotScrollCaptureLayered");
+const ACTION_CLASS_NAME: PCWSTR = w!("SnowShotScrollCaptureActions");
 const OVERLAY_TITLE: PCWSTR = w!("Snow Shot 长截图");
 const BORDER_THICKNESS: i32 = 2;
 // Mirrors the original scroll-screenshot UI: a 128px thumbnail strip beside the
@@ -46,19 +49,34 @@ const STRIP_GAP: f32 = 8.0;
 const EDGE_MASK_NUMERATOR: u32 = 174; // keep 68% brightness ≈ rgba(0,0,0,0.32) overlay
 const PILL_ALPHA: u32 = 115; // antd colorBgMask rgba(0,0,0,0.45)
 const PILL_TEXT: &str = "滚动页面拼接长图，Enter 完成，Esc 取消";
+// The action bar mirrors the original draw toolbar during scroll capture: a
+// white rounded card whose save/cancel/copy buttons stay clickable while the
+// annotation tools are disabled. Text colors follow the original buttons —
+// neutral save, antd error red cancel, Snow Shot teal copy.
+const ACTION_SAVE: i32 = 1;
+const ACTION_CANCEL: i32 = 2;
+const ACTION_COPY: i32 = 3;
+const ACTION_LABELS: [&str; 3] = ["保存", "取消", "复制"];
+const ACTION_TEXT_COLORS: [u32; 3] = [0x0026_2626, 0x0022_13CF, 0x00A6_B813]; // 0x00BBGGRR
+const ACTION_HOVER_BACKGROUND: [u8; 3] = [245, 245, 245];
 const CAPTURE_IDLE_DELAY: Duration = Duration::from_millis(55);
 const CAPTURE_MAX_DELAY: Duration = Duration::from_millis(140);
 const LOOP_INTERVAL: Duration = Duration::from_millis(8);
 
 static OVERLAY_CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
 static LAYERED_CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
+static ACTION_CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
 static WHEEL_SENDER: OnceLock<Mutex<Option<Sender<ScrollImageList>>>> = OnceLock::new();
+/// Last click on the action bar (`ACTION_SAVE`/`ACTION_COPY`), consumed by the
+/// capture loop; written by the bar's window procedure on the same thread.
+static ACTION_CLICK: AtomicI32 = AtomicI32::new(0);
 
 #[derive(Debug)]
 pub(crate) struct ScrollCaptureRequest {
     pub(crate) monitor_origin_x: i32,
     pub(crate) monitor_origin_y: i32,
     pub(crate) monitor_width: u32,
+    pub(crate) monitor_height: u32,
     pub(crate) region: PixelRect,
     pub(crate) initial_frame: FrozenRegionFrame,
 }
@@ -66,6 +84,11 @@ pub(crate) struct ScrollCaptureRequest {
 #[derive(Debug)]
 pub(crate) enum ScrollCaptureOutcome {
     Completed(FrozenRegionFrame),
+    Saved {
+        width: u32,
+        height: u32,
+        path: PathBuf,
+    },
     Cancelled,
 }
 
@@ -131,6 +154,33 @@ pub(crate) fn run_scroll_capture(
     )?;
     strip.note_result(&service, seed_result);
 
+    let monitor_top = request.monitor_origin_y;
+    let monitor_bottom = request
+        .monitor_origin_y
+        .saturating_add(i32::try_from(request.monitor_height).unwrap_or(i32::MAX));
+    let monitor_left = request.monitor_origin_x;
+    let monitor_right = request
+        .monitor_origin_x
+        .saturating_add(i32::try_from(request.monitor_width).unwrap_or(i32::MAX));
+    let gap = (STRIP_GAP * ui_scale).round() as i32;
+    let mut bar = ActionBar::create(dpi)?;
+    let bar_x = action_bar_x(
+        monitor_left,
+        monitor_right,
+        sel_left,
+        sel_width,
+        bar.width as i32,
+    );
+    let bar_y = action_bar_y(
+        monitor_top,
+        monitor_bottom,
+        sel_top,
+        sel_height,
+        gap,
+        bar.height as i32,
+    );
+    bar.present_at(bar_x, bar_y)?;
+
     let (wheel_sender, wheel_receiver) = mpsc::channel();
     let _hook = MouseHook::install(wheel_sender)?;
     let mut pending_direction = None;
@@ -138,9 +188,11 @@ pub(crate) fn run_scroll_capture(
     let mut last_capture = Instant::now();
     let mut enter_was_down = false;
     let mut escape_was_down = false;
+    ACTION_CLICK.store(0, Ordering::Release);
 
     loop {
         pump_messages();
+        bar.refresh_hover();
         while let Ok(direction) = wheel_receiver.try_recv() {
             // The pill sits inside the selection: hide it on the first scroll so
             // it never appears in sampled frames (captures start after the idle
@@ -173,20 +225,68 @@ pub(crate) fn run_scroll_capture(
             last_capture = Instant::now();
         }
 
+        let clicked = ACTION_CLICK.swap(0, Ordering::AcqRel);
+        if clicked == ACTION_CANCEL {
+            return Ok(ScrollCaptureOutcome::Cancelled);
+        }
         let enter_is_down = key_is_down(VK_RETURN.0);
-        if enter_is_down && !enter_was_down {
-            let image = service.export().unwrap_or_else(|| {
-                DynamicImage::ImageRgba8(
-                    RgbaImage::from_raw(initial_width, initial_height, initial_rgba.clone())
-                        .expect("validated initial long screenshot frame"),
-                )
-            });
-            let rgba = image.to_rgba8();
-            let frame = FrozenRegionFrame::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
-                .map_err(|error| error.to_string())?;
+        if clicked == ACTION_COPY || (enter_is_down && !enter_was_down) {
+            let frame = export_stitched_frame(
+                &mut service,
+                initial_width,
+                initial_height,
+                initial_rgba.clone(),
+            )?;
             return Ok(ScrollCaptureOutcome::Completed(frame));
         }
         enter_was_down = enter_is_down;
+
+        if clicked == ACTION_SAVE {
+            // Mirror the original toolbar save flow: the session pauses for the
+            // dialog and resumes when the user cancels it.
+            overlay.set_visible(false);
+            strip.set_visible(false);
+            bar.set_visible(false);
+            if pill_visible && let Some(pill) = &pill {
+                pill.hide();
+            }
+            let choice = rfd::FileDialog::new()
+                .add_filter("PNG 图片", &["png"])
+                .set_file_name("snow-shot.png")
+                .set_title("保存 Snow Shot 长截图")
+                .save_file();
+            match choice {
+                Some(path) => {
+                    let frame = export_stitched_frame(
+                        &mut service,
+                        initial_width,
+                        initial_height,
+                        initial_rgba.clone(),
+                    )?;
+                    let summary = save_region_frame_to_path(&frame, &path)
+                        .map_err(|error| error.to_string())?;
+                    return Ok(ScrollCaptureOutcome::Saved {
+                        width: summary.width(),
+                        height: summary.height(),
+                        path,
+                    });
+                }
+                None => {
+                    overlay.set_visible(true);
+                    strip.set_visible(true);
+                    bar.set_visible(true);
+                    if pill_visible && let Some(pill) = &pill {
+                        pill.show();
+                    }
+                    // Scrolls made while the dialog was open must not trigger a
+                    // burst of stale captures once the loop resumes.
+                    while wheel_receiver.try_recv().is_ok() {}
+                    pending_direction = None;
+                    last_wheel = Instant::now();
+                    last_capture = Instant::now();
+                }
+            }
+        }
 
         let escape_is_down = key_is_down(VK_ESCAPE.0);
         if escape_is_down && !escape_was_down {
@@ -195,6 +295,23 @@ pub(crate) fn run_scroll_capture(
         escape_was_down = escape_is_down;
         thread::sleep(LOOP_INTERVAL);
     }
+}
+
+fn export_stitched_frame(
+    service: &mut ScrollScreenshotService,
+    initial_width: u32,
+    initial_height: u32,
+    initial_rgba: Vec<u8>,
+) -> Result<FrozenRegionFrame, String> {
+    let image = service.export().unwrap_or_else(|| {
+        DynamicImage::ImageRgba8(
+            RgbaImage::from_raw(initial_width, initial_height, initial_rgba)
+                .expect("validated initial long screenshot frame"),
+        )
+    });
+    let rgba = image.to_rgba8();
+    FrozenRegionFrame::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
+        .map_err(|error| error.to_string())
 }
 
 fn key_is_down(key: u16) -> bool {
@@ -340,6 +457,15 @@ impl ScrollOverlay {
         }
         Ok(Self { windows })
     }
+
+    fn set_visible(&self, visible: bool) {
+        for hwnd in &self.windows {
+            // SAFETY: these HWND values were created and are owned by this overlay.
+            unsafe {
+                let _ = ShowWindow(*hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
+    }
 }
 
 impl Drop for ScrollOverlay {
@@ -424,66 +550,7 @@ impl LayeredWindow {
     }
 
     fn present(&self, x: i32, y: i32, width: u32, height: u32, bgra: &[u8]) -> Result<(), String> {
-        debug_assert_eq!(bgra.len(), width as usize * height as usize * 4);
-        // SAFETY: every GDI object created below is released before returning and
-        // the DIB pointer is only written while the section is selected.
-        unsafe {
-            let screen_dc = GetDC(None);
-            let memory_dc = CreateCompatibleDC(Some(screen_dc));
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width as i32,
-                    biHeight: -(height as i32),
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits = std::ptr::null_mut();
-            let dib = CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-                .map_err(|error| {
-                    let _ = DeleteDC(memory_dc);
-                    ReleaseDC(None, screen_dc);
-                    format!("无法创建长截图预览位图：{error}")
-                })?;
-            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
-            let previous = SelectObject(memory_dc, HGDIOBJ(dib.0));
-
-            let destination = POINT { x, y };
-            let size = SIZE {
-                cx: width as i32,
-                cy: height as i32,
-            };
-            let source = POINT { x: 0, y: 0 };
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
-            let update = UpdateLayeredWindow(
-                self.hwnd,
-                Some(screen_dc),
-                Some(&destination as *const POINT),
-                Some(&size as *const SIZE),
-                Some(memory_dc),
-                Some(&source as *const POINT),
-                COLORREF(0),
-                Some(&blend as *const BLENDFUNCTION),
-                ULW_ALPHA,
-            );
-
-            SelectObject(memory_dc, previous);
-            let _ = DeleteObject(HGDIOBJ(dib.0));
-            let _ = DeleteDC(memory_dc);
-            ReleaseDC(None, screen_dc);
-            update.map_err(|error| format!("无法更新长截图预览层：{error}"))?;
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
-        Ok(())
+        present_layered(self.hwnd, x, y, width, height, bgra)
     }
 
     fn hide(&self) {
@@ -492,6 +559,84 @@ impl LayeredWindow {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
+
+    fn show(&self) {
+        // SAFETY: the window is owned by this instance; layered content persists.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+}
+
+/// Pushes a premultiplied BGRA buffer to a layered window at a screen position.
+fn present_layered(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+) -> Result<(), String> {
+    debug_assert_eq!(bgra.len(), width as usize * height as usize * 4);
+    // SAFETY: every GDI object created below is released before returning and
+    // the DIB pointer is only written while the section is selected.
+    unsafe {
+        let screen_dc = GetDC(None);
+        let memory_dc = CreateCompatibleDC(Some(screen_dc));
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let dib = CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+            .map_err(|error| {
+                let _ = DeleteDC(memory_dc);
+                ReleaseDC(None, screen_dc);
+                format!("无法创建长截图预览位图：{error}")
+            })?;
+        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+        let previous = SelectObject(memory_dc, HGDIOBJ(dib.0));
+
+        let destination = POINT { x, y };
+        let size = SIZE {
+            cx: width as i32,
+            cy: height as i32,
+        };
+        let source = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let update = UpdateLayeredWindow(
+            hwnd,
+            Some(screen_dc),
+            Some(&destination as *const POINT),
+            Some(&size as *const SIZE),
+            Some(memory_dc),
+            Some(&source as *const POINT),
+            COLORREF(0),
+            Some(&blend as *const BLENDFUNCTION),
+            ULW_ALPHA,
+        );
+
+        SelectObject(memory_dc, previous);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(None, screen_dc);
+        update.map_err(|error| format!("无法更新长截图预览层：{error}"))?;
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    Ok(())
 }
 
 impl Drop for LayeredWindow {
@@ -532,6 +677,299 @@ impl TipPill {
 
     fn hide(&self) {
         self.window.hide();
+    }
+
+    fn show(&self) {
+        self.window.show();
+    }
+}
+
+/// Clickable save/cancel/copy bar shown beside the selection, standing in for
+/// the original draw toolbar whose action buttons stay usable during scroll
+/// capture while the annotation tools are disabled.
+struct ActionBar {
+    hwnd: HWND,
+    width: u32,
+    height: u32,
+    dpi: u32,
+    x: i32,
+    y: i32,
+    hover: i32,
+}
+
+impl ActionBar {
+    fn create(dpi: u32) -> Result<Self, String> {
+        ensure_action_class()?;
+        let instance = module_instance()?;
+        // SAFETY: the registered class and module remain valid for the process
+        // lifetime. No WS_EX_TRANSPARENT: this window must receive clicks.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+                ACTION_CLASS_NAME,
+                OVERLAY_TITLE,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+        }
+        .map_err(|error| format!("无法创建长截图操作栏：{error}"))?;
+        let (width, height, _) = render_action_bar_bitmap(dpi, 0)?;
+        Ok(Self {
+            hwnd,
+            width,
+            height,
+            dpi,
+            x: 0,
+            y: 0,
+            hover: 0,
+        })
+    }
+
+    fn present_at(&mut self, x: i32, y: i32) -> Result<(), String> {
+        self.x = x;
+        self.y = y;
+        self.repaint()
+    }
+
+    fn repaint(&self) -> Result<(), String> {
+        let (width, height, pixels) = render_action_bar_bitmap(self.dpi, self.hover)?;
+        present_layered(self.hwnd, self.x, self.y, width, height, &pixels)
+    }
+
+    /// Polls the cursor against the bar rect and repaints when the hovered
+    /// button changes; cheaper and simpler than TrackMouseEvent bookkeeping.
+    fn refresh_hover(&mut self) {
+        let mut cursor = POINT::default();
+        // SAFETY: GetCursorPos writes to the provided POINT.
+        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+            return;
+        }
+        let inside = cursor.x >= self.x
+            && cursor.x < self.x + self.width as i32
+            && cursor.y >= self.y
+            && cursor.y < self.y + self.height as i32;
+        let hover = if inside {
+            action_zone(cursor.x - self.x, self.width as i32)
+        } else {
+            0
+        };
+        if hover != self.hover {
+            self.hover = hover;
+            let _ = self.repaint();
+        }
+    }
+
+    fn set_visible(&self, visible: bool) {
+        // SAFETY: the window is owned by this instance.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    }
+}
+
+impl Drop for ActionBar {
+    fn drop(&mut self) {
+        // SAFETY: the HWND was created and is exclusively owned by this instance.
+        let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+// SAFETY: runs on the capture thread that owns the window; only touches atomics.
+unsafe extern "system" fn action_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_LBUTTONUP {
+        let mut client = RECT::default();
+        // SAFETY: client is writable and hwnd is the window receiving this message.
+        let _ = unsafe { GetClientRect(hwnd, &mut client) };
+        let x = (lparam.0 & 0xffff) as u16 as i16 as i32;
+        ACTION_CLICK.store(action_zone(x, client.right.max(1)), Ordering::Release);
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Maps an x offset inside the bar to `ACTION_SAVE`/`ACTION_CANCEL`/`ACTION_COPY`.
+/// All three labels are two CJK glyphs wide, so the buttons split evenly.
+fn action_zone(x: i32, width: i32) -> i32 {
+    let zone = (x * 3 / width.max(1)).clamp(0, 2);
+    zone + 1
+}
+
+/// Right-aligns the bar to the selection like the original toolbar default.
+fn action_bar_x(
+    monitor_left: i32,
+    monitor_right: i32,
+    sel_left: i32,
+    sel_width: i32,
+    bar_width: i32,
+) -> i32 {
+    (sel_left + sel_width - bar_width)
+        .clamp(monitor_left, (monitor_right - bar_width).max(monitor_left))
+}
+
+/// Places the bar below the selection, flipping above when there is no room,
+/// mirroring the original toolbar's below-with-above-fallback placement.
+fn action_bar_y(
+    monitor_top: i32,
+    monitor_bottom: i32,
+    sel_top: i32,
+    sel_height: i32,
+    gap: i32,
+    bar_height: i32,
+) -> i32 {
+    let below = sel_top + sel_height + gap;
+    if below + bar_height <= monitor_bottom {
+        return below;
+    }
+    let above = sel_top - gap - bar_height;
+    if above >= monitor_top {
+        return above;
+    }
+    (monitor_bottom - bar_height).max(monitor_top)
+}
+
+/// Renders the action bar as an opaque white rounded card with evenly split
+/// text buttons; `hover` (1-based zone) tints that button's background.
+fn render_action_bar_bitmap(dpi: u32, hover: i32) -> Result<(u32, u32, Vec<u8>), String> {
+    let scale = dpi as f32 / 96.0;
+    let pad_x = (14.0 * scale).round() as i32;
+    let pad_y = (8.0 * scale).round() as i32;
+    let radius = (8.0 * scale).round() as i32;
+
+    // SAFETY: all GDI objects are created and released in this scope; the DIB
+    // bits stay valid while the section is selected into the memory DC.
+    unsafe {
+        let screen_dc = GetDC(None);
+        let memory_dc = CreateCompatibleDC(Some(screen_dc));
+        let font = CreateFontW(
+            -((14.0 * scale).round() as i32),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        );
+        let previous_font = SelectObject(memory_dc, HGDIOBJ(font.0));
+
+        let mut label_width = 1;
+        let mut label_height = 1;
+        for label in ACTION_LABELS {
+            let mut wide: Vec<u16> = label.encode_utf16().collect();
+            let mut measure = RECT::default();
+            DrawTextW(
+                memory_dc,
+                &mut wide,
+                &mut measure,
+                DT_CALCRECT | DT_SINGLELINE,
+            );
+            label_width = label_width.max(measure.right - measure.left);
+            label_height = label_height.max(measure.bottom - measure.top);
+        }
+        let button_width = label_width + pad_x * 2;
+        let width = (button_width * ACTION_LABELS.len() as i32) as u32;
+        let height = (label_height + pad_y * 2) as u32;
+
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let dib = CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+            .map_err(|error| {
+                SelectObject(memory_dc, previous_font);
+                let _ = DeleteObject(HGDIOBJ(font.0));
+                let _ = DeleteDC(memory_dc);
+                ReleaseDC(None, screen_dc);
+                format!("无法创建长截图操作栏位图：{error}")
+            })?;
+        let previous_bitmap = SelectObject(memory_dc, HGDIOBJ(dib.0));
+
+        let byte_count = width as usize * height as usize * 4;
+        let pixel_bits = std::slice::from_raw_parts_mut(bits as *mut u8, byte_count);
+        for (pixel, chunk) in pixel_bits.chunks_exact_mut(4).enumerate() {
+            let x = (pixel % width as usize) as i32;
+            let background = if hover > 0 && action_zone(x, width as i32) == hover {
+                ACTION_HOVER_BACKGROUND
+            } else {
+                [255, 255, 255]
+            };
+            chunk[0] = background[0];
+            chunk[1] = background[1];
+            chunk[2] = background[2];
+            chunk[3] = 255;
+        }
+
+        SetBkMode(memory_dc, TRANSPARENT);
+        for (index, label) in ACTION_LABELS.iter().enumerate() {
+            SetTextColor(memory_dc, COLORREF(ACTION_TEXT_COLORS[index]));
+            let mut wide: Vec<u16> = label.encode_utf16().collect();
+            let left = button_width * index as i32;
+            let mut text_rect = RECT {
+                left: left + pad_x,
+                top: pad_y,
+                right: left + pad_x + label_width,
+                bottom: pad_y + label_height,
+            };
+            DrawTextW(memory_dc, &mut wide, &mut text_rect, DT_SINGLELINE);
+        }
+        let _ = GdiFlush();
+
+        let mut pixels = std::slice::from_raw_parts(bits as *const u8, byte_count).to_vec();
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let index = (y * width as i32 + x) as usize * 4;
+                if rounded_rect_contains(x, y, width as i32, height as i32, radius) {
+                    pixels[index + 3] = 255;
+                } else {
+                    pixels[index..index + 4].fill(0);
+                }
+            }
+        }
+        // Hairline separators between the buttons, matching the toolbar splitter.
+        for separator in 1..ACTION_LABELS.len() as i32 {
+            let x = button_width * separator;
+            for y in (height as i32 / 4)..(height as i32 * 3 / 4) {
+                let index = (y * width as i32 + x) as usize * 4;
+                pixels[index] = 235;
+                pixels[index + 1] = 235;
+                pixels[index + 2] = 235;
+            }
+        }
+
+        SelectObject(memory_dc, previous_bitmap);
+        SelectObject(memory_dc, previous_font);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(None, screen_dc);
+        Ok((width, height, pixels))
     }
 }
 
@@ -769,6 +1207,14 @@ impl PreviewStrip {
             &pixels,
         );
     }
+
+    fn set_visible(&self, visible: bool) {
+        if visible {
+            self.window.show();
+        } else {
+            self.window.hide();
+        }
+    }
 }
 
 /// Composes the strip buffer (premultiplied BGRA): segments painted in capture
@@ -866,22 +1312,29 @@ fn strip_screen_x(
 
 fn ensure_overlay_class() -> Result<u16, String> {
     OVERLAY_CLASS
-        .get_or_init(|| register_class(OVERLAY_CLASS_NAME, overlay_window_proc))
+        .get_or_init(|| register_class(OVERLAY_CLASS_NAME, overlay_window_proc, IDC_ARROW))
         .clone()
 }
 
 fn ensure_layered_class() -> Result<u16, String> {
     LAYERED_CLASS
-        .get_or_init(|| register_class(LAYERED_CLASS_NAME, layered_window_proc))
+        .get_or_init(|| register_class(LAYERED_CLASS_NAME, layered_window_proc, IDC_ARROW))
+        .clone()
+}
+
+fn ensure_action_class() -> Result<u16, String> {
+    ACTION_CLASS
+        .get_or_init(|| register_class(ACTION_CLASS_NAME, action_window_proc, IDC_HAND))
         .clone()
 }
 
 fn register_class(
     name: PCWSTR,
     proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+    cursor: PCWSTR,
 ) -> Result<u16, String> {
     let instance = module_instance()?;
-    let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
+    let cursor = unsafe { LoadCursorW(None, cursor) }
         .map_err(|error| format!("无法加载长截图光标：{error}"))?;
     let class = WNDCLASSW {
         lpfnWndProc: Some(proc),
@@ -914,7 +1367,8 @@ fn high_word_signed(value: u32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        StripSegment, compose_strip, high_word_signed, rounded_rect_contains, strip_screen_x,
+        ACTION_CANCEL, ACTION_COPY, ACTION_SAVE, StripSegment, action_bar_x, action_bar_y,
+        action_zone, compose_strip, high_word_signed, rounded_rect_contains, strip_screen_x,
     };
     use image::RgbaImage;
 
@@ -954,6 +1408,30 @@ mod tests {
         // Rows never covered by a segment stay fully transparent.
         let empty = compose_strip(&[], 0, 6, (0, 3), false, 1.0, 4, 6);
         assert!(empty.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn action_zone_splits_buttons_evenly() {
+        assert_eq!(action_zone(0, 300), ACTION_SAVE);
+        assert_eq!(action_zone(99, 300), ACTION_SAVE);
+        assert_eq!(action_zone(100, 300), ACTION_CANCEL);
+        assert_eq!(action_zone(299, 300), ACTION_COPY);
+    }
+
+    #[test]
+    fn action_bar_sits_below_selection_with_above_fallback() {
+        assert_eq!(action_bar_y(0, 1080, 100, 400, 8, 40), 508);
+        // No room below: flips above the selection.
+        assert_eq!(action_bar_y(0, 1080, 700, 360, 8, 40), 652);
+        // Selection covers the monitor: pinned to the bottom edge.
+        assert_eq!(action_bar_y(0, 1080, 0, 1080, 8, 40), 1040);
+    }
+
+    #[test]
+    fn action_bar_right_aligns_to_selection_within_monitor() {
+        assert_eq!(action_bar_x(0, 1920, 100, 800, 200), 700);
+        // Clamped inside the monitor when the selection hugs the left edge.
+        assert_eq!(action_bar_x(0, 1920, 0, 100, 200), 0);
     }
 
     #[test]

@@ -142,6 +142,7 @@ struct AnnotationUiSnapshot {
     ocr_available: bool,
     selected_text: String,
     has_selected_element: bool,
+    selection_count: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -818,6 +819,7 @@ fn bind_capture_callbacks(
                 monitor_origin_x: frozen.origin_x(),
                 monitor_origin_y: frozen.origin_y(),
                 monitor_width: frozen.width(),
+                monitor_height: frozen.height(),
                 region,
                 initial_frame,
             })
@@ -856,6 +858,13 @@ fn bind_capture_callbacks(
                                     ),
                                     Err(error) => error.to_string(),
                                 }
+                            }
+                            Ok(ScrollCaptureOutcome::Saved {
+                                width,
+                                height,
+                                path,
+                            }) => {
+                                format!("长截图已保存 {}×{} 到 {}。", width, height, path.display())
                             }
                             Ok(ScrollCaptureOutcome::Cancelled) => "已取消长截图。".to_string(),
                             Err(error) => format!("长截图失败：{error}"),
@@ -1144,34 +1153,33 @@ fn bind_capture_callbacks(
                         if phase == 0 {
                             annotation.color = annotation.document.sample_original(point);
                             let patch = match active_color_slot {
-                                1 => {
-                                    annotation.style.fill = annotation.color;
-                                    StylePatch {
-                                        fill: Some(annotation.color),
-                                        ..StylePatch::default()
-                                    }
-                                }
-                                2 => {
-                                    annotation.style.text = annotation.color;
-                                    StylePatch {
-                                        text: Some(annotation.color),
-                                        ..StylePatch::default()
-                                    }
-                                }
-                                _ => {
-                                    annotation.style.stroke = annotation.color;
-                                    StylePatch {
-                                        stroke: Some(annotation.color),
-                                        ..StylePatch::default()
-                                    }
-                                }
+                                1 => StylePatch {
+                                    fill: Some(annotation.color),
+                                    ..StylePatch::default()
+                                },
+                                2 => StylePatch {
+                                    text: Some(annotation.color),
+                                    ..StylePatch::default()
+                                },
+                                _ => StylePatch {
+                                    stroke: Some(annotation.color),
+                                    ..StylePatch::default()
+                                },
                             };
-                            if annotation.document.selected_ocr_id().is_some() {
-                                let mut style = annotation.document.ocr_style().clone();
-                                style.manual_text_color = Some(annotation.color);
-                                annotation.document.set_ocr_style(style);
-                            } else {
-                                annotation.document.update_selected_style(&patch);
+                            match annotation_property_target(annotation) {
+                                AnnotationPropertyTarget::SelectedOcr => {
+                                    let mut style = annotation.document.ocr_style().clone();
+                                    style.manual_text_color = Some(annotation.color);
+                                    annotation.document.set_ocr_style(style);
+                                }
+                                AnnotationPropertyTarget::SelectedElement => {
+                                    annotation.document.update_selected_style(&patch);
+                                }
+                                AnnotationPropertyTarget::ToolDefaults(_) => {
+                                    apply_style_patch(&mut annotation.style, &patch);
+                                    annotation.stroke_width = annotation.style.stroke_width;
+                                }
+                                AnnotationPropertyTarget::None => {}
                             }
                             if let Ok(mut sample) = annotation_session.sampled_color.lock() {
                                 *sample = Some(SampledColor {
@@ -1193,6 +1201,9 @@ fn bind_capture_callbacks(
                     let tool = annotation_tool(annotation.tool)
                         .ok_or_else(|| "当前标注工具不可用。".to_string())?;
                     match phase {
+                        0 if annotation.tool == 14 => annotation
+                            .document
+                            .begin_marquee_selection(point, preserve_aspect),
                         0 => annotation.document.begin_with_style(
                             tool,
                             point,
@@ -1206,13 +1217,26 @@ fn bind_capture_callbacks(
                             centered,
                         ),
                         2 => {
-                            annotation.document.commit_with_modifiers(
+                            let committed = annotation.document.commit_with_modifiers(
                                 point,
                                 preserve_aspect,
                                 centered,
                             );
+                            if committed && !is_annotation_selection_tool(annotation.tool) {
+                                annotation.document.clear_selection();
+                            }
+                            if annotation.tool == 14 {
+                                annotation.tool = 0;
+                                annotation.previous_tool = 0;
+                            }
                         }
-                        3 => annotation.document.cancel_active(),
+                        3 => {
+                            annotation.document.cancel_active();
+                            if annotation.tool == 14 {
+                                annotation.tool = 0;
+                                annotation.previous_tool = 0;
+                            }
+                        }
                         _ => {}
                     }
                     Ok(annotation_snapshot(annotation))
@@ -1229,26 +1253,28 @@ fn bind_capture_callbacks(
                                 .and_then(|annotation| {
                                     annotation.as_ref().and_then(|annotation| {
                                         (annotation.tool == 7).then(|| {
-                                            let persist = if annotation
-                                                .document
-                                                .selected_ocr_id()
-                                                .is_some()
-                                            {
-                                                PersistedAnnotationStyle::Ocr(
-                                                    annotation.document.ocr_style().clone(),
-                                                )
-                                            } else {
-                                                PersistedAnnotationStyle::Tool(
-                                                    annotation.previous_tool,
-                                                    annotation.style.clone(),
-                                                )
-                                            };
+                                            let persist =
+                                                match annotation_property_target(annotation) {
+                                                    AnnotationPropertyTarget::SelectedOcr => {
+                                                        Some(PersistedAnnotationStyle::Ocr(
+                                                            annotation.document.ocr_style().clone(),
+                                                        ))
+                                                    }
+                                                    AnnotationPropertyTarget::ToolDefaults(
+                                                        tool_id,
+                                                    ) => Some(PersistedAnnotationStyle::Tool(
+                                                        tool_id,
+                                                        annotation.style.clone(),
+                                                    )),
+                                                    AnnotationPropertyTarget::SelectedElement
+                                                    | AnnotationPropertyTarget::None => None,
+                                                };
                                             (annotation.color, persist)
                                         })
                                     })
                                 });
                         if let Some((color, persist)) = picked {
-                            let _ = persist_annotation_style(&annotation_session, Some(persist));
+                            let _ = persist_annotation_style(&annotation_session, persist);
                             let format = annotation_session.color_format.load(Ordering::Acquire);
                             let sample = SampledColor { color, x: 0, y: 0 };
                             let value = format_color_value(sample.color, format);
@@ -2751,6 +2777,12 @@ fn ensure_annotation_state(
             annotation.tool = tool;
             return Ok(annotation_snapshot(annotation));
         }
+        let picker_transition = previous_tool == 7;
+        let within_selection_family =
+            is_annotation_selection_tool(previous_tool) && is_annotation_selection_tool(tool);
+        if previous_tool != tool && !picker_transition && !within_selection_family {
+            annotation.document.clear_selection();
+        }
         annotation.previous_tool = tool;
         annotation.tool = tool;
         annotation.style = style;
@@ -2825,6 +2857,7 @@ fn annotation_tool(tool: i32) -> Option<AnnotationTool> {
         11 => Some(AnnotationTool::Eraser),
         12 => Some(AnnotationTool::Diamond),
         13 => Some(AnnotationTool::Text),
+        14 => Some(AnnotationTool::Select),
         _ => None,
     }
 }
@@ -2847,6 +2880,43 @@ const fn annotation_tool_id(tool: AnnotationTool) -> i32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnotationPropertyTarget {
+    ToolDefaults(i32),
+    SelectedElement,
+    SelectedOcr,
+    None,
+}
+
+fn annotation_property_context_tool(annotation: &AnnotationState) -> i32 {
+    if annotation.tool == 7 {
+        annotation.previous_tool
+    } else {
+        annotation.tool
+    }
+}
+
+fn is_annotation_selection_tool(tool: i32) -> bool {
+    tool == annotation_tool_id(AnnotationTool::Select) || tool == 14
+}
+
+fn annotation_property_target(annotation: &AnnotationState) -> AnnotationPropertyTarget {
+    let context_tool = annotation_property_context_tool(annotation);
+    if is_annotation_selection_tool(context_tool) {
+        if annotation.document.selected_ocr_id().is_some() {
+            AnnotationPropertyTarget::SelectedOcr
+        } else if annotation.document.selection_count() > 0 {
+            AnnotationPropertyTarget::SelectedElement
+        } else {
+            AnnotationPropertyTarget::None
+        }
+    } else if annotation_tool(context_tool).is_some() {
+        AnnotationPropertyTarget::ToolDefaults(context_tool)
+    } else {
+        AnnotationPropertyTarget::None
+    }
+}
+
 fn update_annotation_color(
     session: &CaptureSession,
     slot: i32,
@@ -2861,42 +2931,51 @@ fn update_annotation_color(
         let annotation = annotation
             .as_mut()
             .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
-        if annotation.document.selected_ocr_id().is_some() {
-            let mut style = annotation.document.ocr_style().clone();
-            style.manual_text_color = Some(color);
-            annotation.document.set_ocr_style(style.clone());
-            (
-                annotation_snapshot(annotation),
-                Some(PersistedAnnotationStyle::Ocr(style)),
-            )
-        } else {
-            let patch = match slot {
-                0 => StylePatch {
-                    stroke: Some(color),
-                    ..StylePatch::default()
-                },
-                1 => StylePatch {
-                    fill: Some(color),
-                    ..StylePatch::default()
-                },
-                2 => StylePatch {
-                    text: Some(color),
-                    ..StylePatch::default()
-                },
-                _ => return Err("未知的颜色属性。".to_string()),
-            };
-            let persist = if annotation.document.selected_id().is_some() {
-                annotation.document.update_selected_style(&patch);
-                sync_tool_style_after_selection_edit(annotation, &patch)
-            } else {
+        let patch = match slot {
+            0 => StylePatch {
+                stroke: Some(color),
+                ..StylePatch::default()
+            },
+            1 => StylePatch {
+                fill: Some(color),
+                ..StylePatch::default()
+            },
+            2 => StylePatch {
+                text: Some(color),
+                ..StylePatch::default()
+            },
+            _ => return Err("未知的颜色属性。".to_string()),
+        };
+        match annotation_property_target(annotation) {
+            AnnotationPropertyTarget::SelectedOcr => {
+                let mut style = annotation.document.ocr_style().clone();
+                style.manual_text_color = Some(color);
+                annotation.document.set_ocr_style(style.clone());
+                (
+                    annotation_snapshot(annotation),
+                    Some(PersistedAnnotationStyle::Ocr(style)),
+                )
+            }
+            AnnotationPropertyTarget::SelectedElement => {
+                if !annotation.document.update_selected_style(&patch) {
+                    return Err("请先明确选中一个对象。".to_string());
+                }
+                (annotation_snapshot(annotation), None)
+            }
+            AnnotationPropertyTarget::ToolDefaults(tool_id) => {
                 apply_style_patch(&mut annotation.style, &patch);
                 annotation.color = annotation.style.stroke;
-                Some(PersistedAnnotationStyle::Tool(
-                    annotation.tool,
-                    annotation.style.clone(),
-                ))
-            };
-            (annotation_snapshot(annotation), persist)
+                (
+                    annotation_snapshot(annotation),
+                    Some(PersistedAnnotationStyle::Tool(
+                        tool_id,
+                        annotation.style.clone(),
+                    )),
+                )
+            }
+            AnnotationPropertyTarget::None => {
+                return Err("请先选择标注工具或明确选中一个对象。".to_string());
+            }
         }
     };
     persist_annotation_style(session, persist)?;
@@ -2916,22 +2995,22 @@ fn update_annotation_color_alpha(
         let annotation = annotation
             .as_ref()
             .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
-        if annotation.document.selected_ocr_id().is_some() {
-            annotation
+        match annotation_property_target(annotation) {
+            AnnotationPropertyTarget::SelectedOcr => annotation
                 .document
                 .ocr_style()
                 .manual_text_color
-                .unwrap_or(annotation.style.text)
-        } else {
-            let style = annotation
-                .document
-                .selected_style()
-                .unwrap_or(&annotation.style);
-            match slot {
-                0 => style.stroke,
-                1 => style.fill,
-                2 => style.text,
-                _ => return Err("未知的颜色属性。".to_string()),
+                .unwrap_or(annotation.style.text),
+            AnnotationPropertyTarget::SelectedElement => {
+                let style = annotation
+                    .document
+                    .selected_style()
+                    .ok_or_else(|| "请先明确选中一个对象。".to_string())?;
+                color_for_slot(style, slot)?
+            }
+            AnnotationPropertyTarget::ToolDefaults(_) => color_for_slot(&annotation.style, slot)?,
+            AnnotationPropertyTarget::None => {
+                return Err("请先选择标注工具或明确选中一个对象。".to_string());
             }
         }
     };
@@ -2939,9 +3018,16 @@ fn update_annotation_color_alpha(
     update_annotation_color(session, slot, &color.display_hex())
 }
 
+fn color_for_slot(style: &ElementStyle, slot: i32) -> Result<RgbaColor, String> {
+    match slot {
+        0 => Ok(style.stroke),
+        1 => Ok(style.fill),
+        2 => Ok(style.text),
+        _ => Err("未知的颜色属性。".to_string()),
+    }
+}
 enum PersistedAnnotationStyle {
     Tool(i32, ElementStyle),
-    ToolPatch(i32, StylePatch),
     Ocr(OcrLayerStyle),
 }
 
@@ -2962,39 +3048,10 @@ fn persist_annotation_style(
                 settings.set_style(tool, style);
             }
         }
-        PersistedAnnotationStyle::ToolPatch(tool_id, patch) => {
-            if let Some(tool) = annotation_tool(tool_id) {
-                let mut style = settings.style(tool);
-                apply_style_patch(&mut style, &patch);
-                settings.set_style(tool, style);
-            }
-        }
         PersistedAnnotationStyle::Ocr(style) => settings.set_ocr_style(style),
     }
     settings.save()
 }
-
-/// Editing a selected element also becomes the new default for that element's
-/// tool, so freshly drawn objects inherit the parameters instead of resetting.
-fn sync_tool_style_after_selection_edit(
-    annotation: &mut AnnotationState,
-    patch: &StylePatch,
-) -> Option<PersistedAnnotationStyle> {
-    let element_tool = annotation.document.selected_tool()?;
-    let tool_id = annotation_tool_id(element_tool);
-    if tool_id == annotation.tool {
-        apply_style_patch(&mut annotation.style, patch);
-        annotation.stroke_width = annotation.style.stroke_width;
-        annotation.color = annotation.style.stroke;
-        Some(PersistedAnnotationStyle::Tool(
-            annotation.tool,
-            annotation.style.clone(),
-        ))
-    } else {
-        Some(PersistedAnnotationStyle::ToolPatch(tool_id, patch.clone()))
-    }
-}
-
 fn update_annotation_style_value(
     session: &CaptureSession,
     field: i32,
@@ -3008,7 +3065,8 @@ fn update_annotation_style_value(
         let annotation = annotation
             .as_mut()
             .ok_or_else(|| "当前没有可编辑的标注。".to_string())?;
-        if annotation.document.selected_ocr_id().is_some() {
+        let target = annotation_property_target(annotation);
+        if target == AnnotationPropertyTarget::SelectedOcr {
             let mut style = annotation.document.ocr_style().clone();
             match field {
                 1 => style.opacity = (value / 100.0).clamp(0.0, 1.0),
@@ -3021,10 +3079,24 @@ fn update_annotation_style_value(
                 Some(PersistedAnnotationStyle::Ocr(style)),
             )
         } else if field == 7 {
-            let number = value.round().max(1.0) as u32;
-            annotation.document.update_serial_number(number);
+            if target != AnnotationPropertyTarget::SelectedElement {
+                return Err("请先在选择工具中明确选中一个序号。".to_string());
+            }
+            let number = value.round().clamp(1.0, 999.0) as u32;
+            if !annotation.document.update_serial_number(number) {
+                return Err("序号只能在单独选中时修改。".to_string());
+            }
             (annotation_snapshot(annotation), None)
         } else {
+            let serial_style = match target {
+                AnnotationPropertyTarget::ToolDefaults(tool_id) => {
+                    tool_id == annotation_tool_id(AnnotationTool::SerialNumber)
+                }
+                AnnotationPropertyTarget::SelectedElement => {
+                    annotation.document.selected_tool() == Some(AnnotationTool::SerialNumber)
+                }
+                AnnotationPropertyTarget::SelectedOcr | AnnotationPropertyTarget::None => false,
+            };
             let patch = match field {
                 0 => StylePatch {
                     stroke_width: Some(value),
@@ -3043,7 +3115,11 @@ fn update_annotation_style_value(
                     ..StylePatch::default()
                 },
                 4 => StylePatch {
-                    font_size: Some(value),
+                    font_size: Some(if serial_style {
+                        nearest_serial_font_size(value)
+                    } else {
+                        value
+                    }),
                     ..StylePatch::default()
                 },
                 5 => StylePatch {
@@ -3060,16 +3136,25 @@ fn update_annotation_style_value(
                 },
                 _ => return Err("未知的样式属性。".to_string()),
             };
-            let persist = if annotation.document.selected_id().is_some() {
-                annotation.document.update_selected_style(&patch);
-                sync_tool_style_after_selection_edit(annotation, &patch)
-            } else {
-                apply_style_patch(&mut annotation.style, &patch);
-                annotation.stroke_width = annotation.style.stroke_width;
-                Some(PersistedAnnotationStyle::Tool(
-                    annotation.tool,
-                    annotation.style.clone(),
-                ))
+            let persist = match target {
+                AnnotationPropertyTarget::SelectedElement => {
+                    if !annotation.document.update_selected_style(&patch) {
+                        return Err("请先明确选中一个对象。".to_string());
+                    }
+                    None
+                }
+                AnnotationPropertyTarget::ToolDefaults(tool_id) => {
+                    apply_style_patch(&mut annotation.style, &patch);
+                    annotation.stroke_width = annotation.style.stroke_width;
+                    Some(PersistedAnnotationStyle::Tool(
+                        tool_id,
+                        annotation.style.clone(),
+                    ))
+                }
+                AnnotationPropertyTarget::SelectedOcr => unreachable!(),
+                AnnotationPropertyTarget::None => {
+                    return Err("请先选择标注工具或明确选中一个对象。".to_string());
+                }
             };
             (annotation_snapshot(annotation), persist)
         }
@@ -3078,6 +3163,17 @@ fn update_annotation_style_value(
     Ok(snapshot)
 }
 
+const fn nearest_serial_font_size(value: f32) -> f32 {
+    if value < 18.0 {
+        16.0
+    } else if value < 24.0 {
+        20.0
+    } else if value < 32.0 {
+        28.0
+    } else {
+        36.0
+    }
+}
 fn update_annotation_text(
     session: &CaptureSession,
     text: String,
@@ -3089,6 +3185,9 @@ fn update_annotation_text(
     let annotation = annotation
         .as_mut()
         .ok_or_else(|| "当前没有文本标注。".to_string())?;
+    if annotation_property_target(annotation) != AnnotationPropertyTarget::SelectedElement {
+        return Err("请先切换到选择工具并明确选中文本。".to_string());
+    }
     if !annotation.document.update_selected_text(text) {
         return Err("请先选择文本标注。".to_string());
     }
@@ -3113,7 +3212,15 @@ fn update_annotation_layer(
     let annotation = annotation
         .as_mut()
         .ok_or_else(|| "当前没有可调整的元素。".to_string())?;
-    annotation.document.apply_layer_command(command);
+    if !matches!(
+        annotation_property_target(annotation),
+        AnnotationPropertyTarget::SelectedElement | AnnotationPropertyTarget::SelectedOcr
+    ) {
+        return Err("请先切换到选择工具并明确选中对象。".to_string());
+    }
+    if !annotation.document.apply_layer_command(command) {
+        return Err("当前图层位置无需调整。".to_string());
+    }
     Ok(annotation_snapshot(annotation))
 }
 
@@ -3125,6 +3232,9 @@ fn delete_selected_annotation(session: &CaptureSession) -> Result<AnnotationUiSn
     let annotation = annotation
         .as_mut()
         .ok_or_else(|| "当前没有可删除的元素。".to_string())?;
+    if annotation_property_target(annotation) != AnnotationPropertyTarget::SelectedElement {
+        return Err("请先切换到选择工具并明确选中对象。".to_string());
+    }
     if !annotation.document.delete_selected() {
         return Err("请先选择一个标注元素。".to_string());
     }
@@ -3132,12 +3242,26 @@ fn delete_selected_annotation(session: &CaptureSession) -> Result<AnnotationUiSn
 }
 
 fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
-    let selected_ocr = annotation.document.selected_ocr_id().is_some();
-    let mut style = annotation
-        .document
-        .selected_style()
-        .cloned()
-        .unwrap_or_else(|| annotation.style.clone());
+    let target = annotation_property_target(annotation);
+    let selected_ocr = target == AnnotationPropertyTarget::SelectedOcr;
+    let selected_element = target == AnnotationPropertyTarget::SelectedElement;
+    let selection_count = if selected_element {
+        annotation.document.selection_count()
+    } else {
+        0
+    };
+    let mut style = if selected_element {
+        annotation
+            .document
+            .selected_style()
+            .cloned()
+            .unwrap_or_else(|| annotation.style.clone())
+    } else {
+        annotation.style.clone()
+    };
+    let selected_tool = selected_element
+        .then(|| annotation.document.selected_tool())
+        .flatten();
     if selected_ocr {
         let ocr_style = annotation.document.ocr_style();
         if let Some(color) = ocr_style.manual_text_color {
@@ -3145,6 +3269,12 @@ fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
         }
         style.opacity = ocr_style.opacity;
         style.effect_strength = ocr_style.blur_strength;
+    } else if selected_tool == Some(AnnotationTool::SerialNumber)
+        || (!selected_element
+            && annotation_property_context_tool(annotation)
+                == annotation_tool_id(AnnotationTool::SerialNumber))
+    {
+        style.font_size = nearest_serial_font_size(style.font_size);
     }
     AnnotationUiSnapshot {
         width: annotation.document.width(),
@@ -3156,12 +3286,13 @@ fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
         has_annotations: annotation.document.has_annotations(),
         color: annotation.color,
         color_label: annotation.color.display_hex(),
-        selected_ocr_text: annotation
-            .document
-            .selected_ocr_text()
+        selected_ocr_text: selected_ocr
+            .then(|| annotation.document.selected_ocr_text())
+            .flatten()
             .unwrap_or_default()
             .to_string(),
-        ocr_manual_color: annotation.document.ocr_style().manual_text_color.is_some(),
+        ocr_manual_color: selected_ocr
+            && annotation.document.ocr_style().manual_text_color.is_some(),
         ocr_text: annotation.document.ocr_plain_text(),
         ocr_visible: annotation.document.ocr_style().visible
             && !annotation.document.ocr_blocks().is_empty(),
@@ -3186,28 +3317,31 @@ fn annotation_snapshot(annotation: &AnnotationState) -> AnnotationUiSnapshot {
             TextAlignment::Center => 1,
             TextAlignment::Right => 2,
         },
-        serial_number: annotation
-            .document
-            .selected_serial_number()
-            .unwrap_or_else(|| annotation.document.next_serial_number())
-            as f32,
-        selected_is_serial: annotation.document.selected_serial_number().is_some(),
-        selected_tool: annotation
-            .document
-            .selected_tool()
-            .map(annotation_tool_id)
-            .unwrap_or(0),
+        serial_number: if selected_element {
+            annotation
+                .document
+                .selected_serial_number()
+                .unwrap_or_else(|| annotation.document.next_serial_number())
+        } else {
+            annotation.document.next_serial_number()
+        } as f32,
+        selected_is_serial: selection_count == 1
+            && annotation.document.selected_serial_number().is_some(),
+        selected_tool: selected_tool.map(annotation_tool_id).unwrap_or(0),
         ocr_available: !annotation.document.ocr_blocks().is_empty(),
-        selected_text: annotation
-            .document
-            .selected_text()
-            .unwrap_or_default()
-            .to_string(),
-        has_selected_element: annotation.document.selected_id().is_some()
-            || annotation.document.selected_ocr_id().is_some(),
+        selected_text: if selection_count == 1 {
+            annotation
+                .document
+                .selected_text()
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            String::new()
+        },
+        has_selected_element: selected_element || selected_ocr,
+        selection_count: selection_count as i32,
     }
 }
-
 fn apply_annotation_snapshot(
     capture: &CaptureWindow,
     snapshot: AnnotationUiSnapshot,
@@ -3252,6 +3386,7 @@ fn apply_annotation_snapshot(
     capture.set_ocr_available(snapshot.ocr_available);
     capture.set_selected_text(snapshot.selected_text.into());
     capture.set_has_selected_element(snapshot.has_selected_element);
+    capture.set_annotation_selection_count(snapshot.selection_count);
     capture.window().request_redraw();
     Ok(())
 }
@@ -3289,6 +3424,7 @@ fn clear_annotation_ui(capture: &CaptureWindow) {
     capture.set_ocr_available(false);
     capture.set_selected_text(String::new().into());
     capture.set_has_selected_element(false);
+    capture.set_annotation_selection_count(0);
 }
 
 fn slint_color(color: RgbaColor) -> Color {
@@ -3899,43 +4035,33 @@ mod tests {
     }
 
     #[test]
-    fn selection_edit_updates_tool_defaults_for_new_objects() {
-        use snow_shot_annotate::StylePatch;
-        let mut annotation = annotation_state_with_selected_element(super::AnnotationTool::Pen, 1);
-        let patch = StylePatch {
-            stroke_width: Some(12.0),
-            opacity: Some(0.4),
-            ..StylePatch::default()
-        };
-        annotation.document.update_selected_style(&patch);
-        let persist = super::sync_tool_style_after_selection_edit(&mut annotation, &patch);
-        assert_eq!(annotation.style.stroke_width, 12.0);
-        assert_eq!(annotation.style.opacity, 0.4);
-        assert_eq!(annotation.stroke_width, 12.0);
-        assert!(matches!(
-            persist,
-            Some(super::PersistedAnnotationStyle::Tool(1, ref style))
-                if style.stroke_width == 12.0
-        ));
+    fn drawing_tool_properties_target_future_defaults_even_after_drawing() {
+        let annotation = annotation_state_with_selected_element(super::AnnotationTool::Pen, 1);
+        assert_eq!(
+            super::annotation_property_target(&annotation),
+            super::AnnotationPropertyTarget::ToolDefaults(1)
+        );
     }
 
     #[test]
-    fn selection_edit_with_select_tool_persists_to_element_tool() {
-        use snow_shot_annotate::StylePatch;
-        let mut annotation =
+    fn select_tool_properties_target_only_the_explicit_selection() {
+        let annotation =
             annotation_state_with_selected_element(super::AnnotationTool::Rectangle, 0);
-        let patch = StylePatch {
-            stroke_width: Some(9.0),
-            ..StylePatch::default()
-        };
-        annotation.document.update_selected_style(&patch);
-        let persist = super::sync_tool_style_after_selection_edit(&mut annotation, &patch);
+        assert_eq!(
+            super::annotation_property_target(&annotation),
+            super::AnnotationPropertyTarget::SelectedElement
+        );
         assert_eq!(annotation.style.stroke_width, 4.0);
-        assert!(matches!(
-            persist,
-            Some(super::PersistedAnnotationStyle::ToolPatch(8, ref applied))
-                if applied.stroke_width == Some(9.0)
-        ));
+    }
+
+    #[test]
+    fn marquee_tool_properties_target_the_current_selection() {
+        let annotation =
+            annotation_state_with_selected_element(super::AnnotationTool::Rectangle, 14);
+        assert_eq!(
+            super::annotation_property_target(&annotation),
+            super::AnnotationPropertyTarget::SelectedElement
+        );
     }
 
     #[test]

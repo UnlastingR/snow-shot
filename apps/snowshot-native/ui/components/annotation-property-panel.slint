@@ -95,6 +95,7 @@ component NumberInput inherits Rectangle {
     in property <int> maximum;
     callback changed(float);
     callback focus-changed(bool);
+    callback interaction-completed();
     property <int> display-value: Math.round(root.value);
 
     function commit-text() {
@@ -105,6 +106,7 @@ component NumberInput inherits Rectangle {
     }
     function step(delta: int) {
         root.changed(Math.max(root.minimum, Math.min(root.maximum, root.display-value + delta)));
+        root.interaction-completed();
     }
 
     changed value => {
@@ -131,7 +133,10 @@ component NumberInput inherits Rectangle {
                 single-line: true;
                 input-type: number;
                 text: root.display-value;
-                accepted => { self.clear-focus(); }
+                accepted => {
+                    self.clear-focus();
+                    root.interaction-completed();
+                }
                 changed has-focus => {
                     root.focus-changed(self.has-focus);
                     if (!self.has-focus) { root.commit-text(); }
@@ -193,6 +198,7 @@ component SliderField inherits VerticalLayout {
     in property <bool> show-input: true;
     callback changed(float);
     callback input-focus-changed(bool);
+    callback interaction-completed();
     spacing: 4px;
 
     PanelLabel { text: root.label; }
@@ -206,6 +212,7 @@ component SliderField inherits VerticalLayout {
             maximum: root.maximum;
             value: root.value;
             changed(value) => { root.changed(value); }
+            released(value) => { root.interaction-completed(); }
         }
         if root.show-input : NumberInput {
             minimum: root.minimum;
@@ -213,6 +220,7 @@ component SliderField inherits VerticalLayout {
             value: root.value;
             changed(value) => { root.changed(value); }
             focus-changed(focus) => { root.input-focus-changed(focus); }
+            interaction-completed => { root.interaction-completed(); }
         }
     }
 }
@@ -236,6 +244,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
     in property <float> serial-number: 1;
     in property <bool> selected-is-serial: false;
     in property <int> selected-annotation-tool: 0;
+    in property <int> selection-count: 0;
     in property <bool> ocr-available: false;
     in-out property <string> selected-text;
     in property <bool> ocr-visible: false;
@@ -256,13 +265,15 @@ export component AnnotationPropertyPanel inherits Rectangle {
     callback drag-moved();
     callback drag-ended();
     callback input-focus-changed(bool);
+    callback interaction-completed();
 
     private property <float> active-color-alpha:
         root.active-color-slot == 1 ? root.fill-color.alpha / 2.55
         : root.active-color-slot == 2 ? root.text-color.alpha / 2.55
         : root.stroke-color.alpha / 2.55;
     private property <int> effective-tool:
-        (root.active-tool == 0 || root.active-tool == 7 || root.active-tool == 11)
+        (root.active-tool == 0 || root.active-tool == 7
+            || root.active-tool == 11 || root.active-tool == 14)
             && root.selected-annotation-tool != 0
             ? root.selected-annotation-tool
             : root.active-tool;
@@ -332,6 +343,11 @@ export component AnnotationPropertyPanel inherits Rectangle {
                     }
                 }
             }
+        }
+
+        if root.selection-count > 1 : PanelLabel {
+            text: "已选 " + root.selection-count + " 个对象";
+            color: #595959;
         }
 
         if root.show-stroke-color : VerticalLayout {
@@ -473,6 +489,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
             maximum: 100;
             show-input: false;
             changed(value) => { root.color-alpha-changed(root.active-color-slot, value); }
+            interaction-completed => { root.interaction-completed(); }
         }
 
         if !root.ocr-selected && (root.is-shape || root.is-line || root.is-pen) : SliderField {
@@ -482,15 +499,49 @@ export component AnnotationPropertyPanel inherits Rectangle {
             maximum: 32;
             changed(value) => { root.style-value-changed(0, value); }
             input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            interaction-completed => { root.interaction-completed(); }
         }
 
-        if !root.ocr-selected && (root.is-text || root.is-serial) : SliderField {
+        if !root.ocr-selected && root.is-text : SliderField {
             label: "字号";
             value: root.font-size;
             minimum: 8;
             maximum: 128;
             changed(value) => { root.style-value-changed(4, value); }
             input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            interaction-completed => { root.interaction-completed(); }
+        }
+
+        if !root.ocr-selected && root.is-serial && root.selection-count <= 1 : VerticalLayout {
+            spacing: 4px;
+            PanelLabel { text: "字号"; }
+            HorizontalLayout {
+                spacing: 6px;
+                PanelButton {
+                    width: 38px;
+                    label: "16";
+                    selected: Math.round(root.font-size) == 16;
+                    clicked => { root.style-value-changed(4, 16); }
+                }
+                PanelButton {
+                    width: 38px;
+                    label: "20";
+                    selected: Math.round(root.font-size) == 20;
+                    clicked => { root.style-value-changed(4, 20); }
+                }
+                PanelButton {
+                    width: 38px;
+                    label: "28";
+                    selected: Math.round(root.font-size) == 28;
+                    clicked => { root.style-value-changed(4, 28); }
+                }
+                PanelButton {
+                    width: 38px;
+                    label: "36";
+                    selected: Math.round(root.font-size) == 36;
+                    clicked => { root.style-value-changed(4, 36); }
+                }
+            }
         }
 
         if !root.ocr-selected && (root.is-pen || root.is-effect) : SliderField {
@@ -500,6 +551,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
             maximum: 128;
             changed(value) => { root.style-value-changed(2, value); }
             input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            interaction-completed => { root.interaction-completed(); }
         }
 
         if root.ocr-selected || root.is-effect : SliderField {
@@ -509,6 +561,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
             maximum: 100;
             changed(value) => { root.style-value-changed(3, value); }
             input-focus-changed(focused) => { root.input-focus-changed(focused); }
+            interaction-completed => { root.interaction-completed(); }
         }
 
         if root.show-opacity : SliderField {
@@ -518,9 +571,10 @@ export component AnnotationPropertyPanel inherits Rectangle {
             maximum: 100;
             show-input: false;
             changed(value) => { root.style-value-changed(1, value); }
+            interaction-completed => { root.interaction-completed(); }
         }
 
-        if !root.ocr-selected && root.is-text : VerticalLayout {
+        if !root.ocr-selected && root.is-text && root.selection-count <= 1 : VerticalLayout {
             spacing: 4px;
             PanelLabel { text: "字体"; }
             HorizontalLayout {
@@ -563,7 +617,7 @@ export component AnnotationPropertyPanel inherits Rectangle {
             }
         }
 
-        if !root.ocr-selected && root.is-serial : PanelLabel {
+        if !root.ocr-selected && root.is-serial && root.selection-count <= 1 : PanelLabel {
             text: "本次截图编号：" + round(root.serial-number);
             color: #8c8c8c;
         }

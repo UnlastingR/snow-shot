@@ -38,6 +38,7 @@ export component CaptureOverlayPage inherits Rectangle {
     in property <float> style-serial-number;
     in property <bool> selected-is-serial;
     in property <int> selected-annotation-tool;
+    in property <int> annotation-selection-count;
     in property <bool> ocr-available;
     in-out property <int> active-color-slot: 0;
     in-out property <string> selected-text;
@@ -458,6 +459,8 @@ export component CaptureOverlayPage inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.move
                     || event.kind == PointerEventKind.down) {
+                // Hover activates the canvas before the next drawing press.
+                keyboard-focus.focus();
                 root.update-sample(self.mouse-x, self.mouse-y);
             }
             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left
@@ -671,6 +674,7 @@ export component CaptureOverlayPage inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.move
                     || event.kind == PointerEventKind.down) {
+                keyboard-focus.focus();
                 root.update-sample(self.x + self.mouse-x, self.y + self.mouse-y);
             }
             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
@@ -860,8 +864,12 @@ export component CaptureOverlayPage inherits Rectangle {
         Text {
             text: root.has-selection
                 ? root.annotation-visible
-                    ? root.annotation-tool > 0
-                        ? "在选区内拖动标注 · Ctrl+Z 撤销 · Ctrl+Y 重做"
+                    ? root.annotation-tool == 14
+                        ? "拖动框选多个标注 · Shift 追加选择 · 松开后返回选择工具"
+                        : root.annotation-tool > 0
+                            ? "在选区内拖动标注 · Ctrl+Z 撤销 · Ctrl+Y 重做"
+                            : root.annotation-selection-count > 1
+                                ? "已选多个标注 · 拖动整体移动 · Delete 删除 · Ctrl+Z 撤销"
                         : root.ocr-selected-text != ""
                             ? "已选 OCR 文字块 · Ctrl+C 复制文字 · Ctrl+Shift+C 复制图片"
                             : "单击选择标注或 OCR 文字块 · Ctrl+C 复制图片"
@@ -890,6 +898,7 @@ export component CaptureOverlayPage inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.move
                     || event.kind == PointerEventKind.down) {
+                keyboard-focus.focus();
                 root.annotation-hover-handle = root.annotation-tool == 0
                     ? root.annotation-handle-at(
                         self.mouse-x / max(1px, self.width),
@@ -903,6 +912,9 @@ export component CaptureOverlayPage inherits Rectangle {
             }
             if (event.kind == PointerEventKind.down
                     && event.button == PointerEventButton.left) {
+                // Match the original editor: commit/clear property focus as
+                // part of this same press, before starting the annotation.
+                keyboard-focus.focus();
                 if (root.annotation-tool == 0
                         && !root.annotation-hit-test(
                             self.mouse-x / max(1px, self.width),
@@ -924,7 +936,6 @@ export component CaptureOverlayPage inherits Rectangle {
                         event.modifiers.control,
                     );
                 }
-                keyboard-focus.focus();
             } else if (event.kind == PointerEventKind.move
                     && root.selection-move-from-annotation
                     && self.pressed) {
@@ -1110,8 +1121,10 @@ export component CaptureOverlayPage inherits Rectangle {
     property-panel := AnnotationPropertyPanel {
         z: 20;
         visible: root.presentation-active && root.has-selection && root.annotation-visible
-            && ((root.annotation-tool != 0 && root.annotation-tool != 7 && root.annotation-tool != 11)
-                || root.has-selected-element || root.ocr-available);
+            && (root.annotation-tool == 14
+                ? root.annotation-selection-count > 0
+                : ((root.annotation-tool != 0 && root.annotation-tool != 7 && root.annotation-tool != 11)
+                    || root.has-selected-element || root.ocr-available));
         // Mirrors the original project: the panel sits to the right of the
         // selection and flips to the left when it would overflow the screen.
         x: root.property-position-x >= 0
@@ -1165,6 +1178,7 @@ export component CaptureOverlayPage inherits Rectangle {
         serial-number: root.style-serial-number;
         selected-is-serial: root.selected-is-serial;
         selected-annotation-tool: root.selected-annotation-tool;
+        selection-count: root.annotation-selection-count;
         ocr-available: root.ocr-available;
         active-color-slot <=> root.active-color-slot;
         selected-text <=> root.selected-text;
@@ -1186,6 +1200,10 @@ export component CaptureOverlayPage inherits Rectangle {
         ocr-visibility-requested(visible) => { root.ocr-visibility-requested(visible); }
         ocr-auto-color-requested => { root.ocr-auto-color-requested(); }
         input-focus-changed(focused) => { root.text-input-active = focused; }
+        interaction-completed => {
+            root.text-input-active = false;
+            keyboard-focus.focus();
+        }
     }
 
     if root.presentation-active && root.magnifier-visible

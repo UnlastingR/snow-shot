@@ -33,6 +33,7 @@ export component CaptureWindow inherits Window {
     in-out property <float> style-serial-number: 1;
     in-out property <bool> selected-is-serial: false;
     in-out property <int> selected-annotation-tool: 0;
+    in-out property <int> annotation-selection-count: 0;
     in-out property <bool> ocr-available: false;
     in-out property <int> active-color-slot: 0;
     in-out property <string> selected-text: "";
@@ -157,6 +158,7 @@ export component CaptureWindow inherits Window {
         style-serial-number: root.style-serial-number;
         selected-is-serial: root.selected-is-serial;
         selected-annotation-tool: root.selected-annotation-tool;
+        annotation-selection-count: root.annotation-selection-count;
         ocr-available: root.ocr-available;
         active-color-slot <=> root.active-color-slot;
         selected-text <=> root.selected-text;

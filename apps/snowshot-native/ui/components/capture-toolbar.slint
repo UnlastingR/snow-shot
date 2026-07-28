@@ -55,6 +55,7 @@ component ToolGlyph inherits Path {
         : root.kind == 11 ? "M 8 4 L 20 16 L 15 21 H 9 L 3 15 Z M 6 12 L 13 19"
         : root.kind == 12 ? "M 12 3 L 21 12 L 12 21 L 3 12 Z"
         : root.kind == 13 ? "M 5 5 H 19 M 12 5 V 20 M 8 20 H 16"
+        : root.kind == 14 ? "M 4 9 V 4 H 9 M 15 4 H 20 V 9 M 20 15 V 20 H 15 M 9 20 H 4 V 15"
         : "M 5 4 H 19 V 20 H 5 Z M 8 8 H 16 M 8 12 H 16 M 8 16 H 14";
     fill: transparent;
     stroke: #262626;
@@ -259,7 +260,8 @@ component InlineSubtools inherits Rectangle {
             label: tool == 8 ? "矩形" : tool == 12 ? "菱形"
                 : tool == 3 ? "箭头" : tool == 2 ? "线段"
                 : tool == 1 ? "画笔" : tool == 10 ? "高亮"
-                : tool == 5 ? "马赛克" : "模糊";
+                : tool == 5 ? "马赛克" : tool == 6 ? "模糊"
+                : tool == 0 ? "选择" : "框选";
             selected: root.active-tool == tool;
             clicked => { root.selected(tool); }
         }
@@ -299,7 +301,7 @@ export component CaptureToolbar inherits Rectangle {
 
     public function dismiss-menu() { root.open-group = 0; }
 
-    width: 884px;
+    width: 892px;
     height: 48px;
     border-radius: 10px;
     border-width: 1px;
@@ -326,7 +328,17 @@ export component CaptureToolbar inherits Rectangle {
         spacing: 2px;
         alignment: center;
 
-        ToolButton { label: "选择"; icon-kind: 0; selected: root.active-tool == 0; clicked => { root.open-group = 0; root.tool-selected(0); } }
+        if root.open-group != 5 : GroupButton {
+            label: "选择";
+            icon-kind: root.active-tool == 14 ? 14 : 0;
+            selected: root.active-tool == 0 || root.active-tool == 14;
+            main-clicked => { root.open-group = 0; root.tool-selected(0); }
+            menu-clicked => { root.open-group = 5; }
+        }
+        if root.open-group == 5 : InlineSubtools {
+            tools: [0, 14]; active-tool: root.active-tool;
+            selected(tool) => { root.open-group = 0; root.tool-selected(tool); }
+        }
         Divider {}
         if root.open-group != 1 : GroupButton {
             label: "图形";

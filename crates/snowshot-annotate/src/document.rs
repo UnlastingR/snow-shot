@@ -15,6 +15,11 @@ use crate::RgbaColor;
 const MAX_HISTORY: usize = 64;
 const MIN_STROKE_WIDTH: f32 = 1.0;
 const MIN_ELEMENT_SIZE: f32 = 8.0;
+const DEFAULT_TEXT_WIDTH: f32 = 320.0;
+const DEFAULT_TEXT_HEIGHT: f32 = 64.0;
+const MIN_TEXT_WIDTH: f32 = 96.0;
+const MIN_TEXT_HEIGHT: f32 = 48.0;
+const TEXT_DRAG_THRESHOLD: f32 = 4.0;
 const HANDLE_RADIUS: f32 = 7.0;
 const OCR_ID_BASE: u64 = 1_u64 << 63;
 
@@ -160,7 +165,7 @@ impl ElementStyle {
                 style.fill = color;
                 style.stroke = RgbaColor::WHITE;
                 style.text = RgbaColor::WHITE;
-                style.font_size = 18.0;
+                style.font_size = 16.0;
             }
             AnnotationTool::Text => {
                 style.text = color;
@@ -257,7 +262,7 @@ impl AnnotationElement {
             } => shape_bounds(*start, *end, *shape, *rotation_radians)
                 .expanded(self.style.stroke_width / 2.0),
             ElementKind::SerialNumber { center, .. } => {
-                let radius = (self.style.font_size * 0.9).clamp(13.0, 36.0);
+                let radius = serial_radius(&self.style);
                 Rect::from_points(
                     Point::new(center.x - radius, center.y - radius),
                     Point::new(center.x + radius, center.y + radius),
@@ -383,11 +388,44 @@ struct DocumentState {
     next_serial_number: u32,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SelectionState {
+    ids: Vec<ElementId>,
+    primary: Option<ElementId>,
+}
+
+impl SelectionState {
+    fn single(id: ElementId) -> Self {
+        Self {
+            ids: vec![id],
+            primary: Some(id),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.ids.clear();
+        self.primary = None;
+    }
+
+    fn contains(&self, id: ElementId) -> bool {
+        self.ids.contains(&id)
+    }
+
+    fn single_id(&self) -> Option<ElementId> {
+        if self.ids.len() == 1 {
+            self.ids.first().copied()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ActiveOperation {
     Draw {
         baseline: DocumentState,
         element: AnnotationElement,
+        anchor: Point,
     },
     Transform {
         baseline: DocumentState,
@@ -395,6 +433,18 @@ enum ActiveOperation {
         handle: SelectionHandle,
         start_pointer: Point,
         start_bounds: Rect,
+    },
+    GroupMove {
+        baseline: DocumentState,
+        originals: Vec<AnnotationElement>,
+        start_pointer: Point,
+        start_bounds: Rect,
+    },
+    Marquee {
+        start: Point,
+        current: Point,
+        baseline_selection: SelectionState,
+        additive: bool,
     },
 }
 
@@ -410,7 +460,7 @@ pub struct AnnotationDocument {
     redo: Vec<DocumentState>,
     active: Option<ActiveOperation>,
     active_base_pixels: Option<Vec<u8>>,
-    selected: Option<ElementId>,
+    selection: SelectionState,
     selected_ocr: Option<ElementId>,
 }
 
@@ -467,7 +517,7 @@ impl AnnotationDocument {
             redo: Vec::new(),
             active: None,
             active_base_pixels: None,
-            selected: None,
+            selection: SelectionState::default(),
             selected_ocr: None,
         })
     }
@@ -524,7 +574,7 @@ impl AnnotationDocument {
         self.state.elements.clear();
         self.state.ocr_blocks.clear();
         self.state.next_serial_number = 1;
-        self.selected = None;
+        self.selection.clear();
         self.selected_ocr = None;
         self.record_state_change(baseline);
         true
@@ -542,8 +592,25 @@ impl AnnotationDocument {
         !self.redo.is_empty()
     }
 
+    /// Primary element retained for compatibility with the single-selection API.
     pub fn selected_id(&self) -> Option<ElementId> {
-        self.selected
+        self.selection.primary
+    }
+
+    pub fn primary_selected_id(&self) -> Option<ElementId> {
+        self.selection.primary
+    }
+
+    pub fn single_selected_id(&self) -> Option<ElementId> {
+        self.selection.single_id()
+    }
+
+    pub fn selected_ids(&self) -> &[ElementId] {
+        &self.selection.ids
+    }
+
+    pub fn selection_count(&self) -> usize {
+        self.selection.ids.len()
     }
 
     pub fn selected_ocr_id(&self) -> Option<ElementId> {
@@ -551,14 +618,68 @@ impl AnnotationDocument {
     }
 
     pub fn selected_bounds(&self) -> Option<Rect> {
-        self.selected
-            .and_then(|id| self.element(id))
+        self.selection_bounds().or_else(|| {
+            self.selected_ocr
+                .and_then(|id| self.ocr_block(id))
+                .map(OcrBlock::bounds)
+        })
+    }
+
+    fn selection_bounds(&self) -> Option<Rect> {
+        self.state
+            .elements
+            .iter()
+            .filter(|element| self.selection.contains(element.id))
             .map(AnnotationElement::bounds)
-            .or_else(|| {
-                self.selected_ocr
-                    .and_then(|id| self.ocr_block(id))
-                    .map(OcrBlock::bounds)
+            .reduce(|combined, bounds| Rect {
+                left: combined.left.min(bounds.left),
+                top: combined.top.min(bounds.top),
+                right: combined.right.max(bounds.right),
+                bottom: combined.bottom.max(bounds.bottom),
             })
+    }
+
+    fn selection_for_marquee(
+        &self,
+        marquee: Rect,
+        baseline: &SelectionState,
+        additive: bool,
+    ) -> SelectionState {
+        let marquee = Rect::from_points(
+            Point::new(marquee.left, marquee.top),
+            Point::new(marquee.right, marquee.bottom),
+        );
+        let mut ids = if additive {
+            baseline.ids.clone()
+        } else {
+            Vec::new()
+        };
+        let mut newest = None;
+        for element in &self.state.elements {
+            if rect_contains_rect(marquee, element.bounds()) && !ids.contains(&element.id) {
+                ids.push(element.id);
+                newest = Some(element.id);
+            }
+        }
+        let primary = newest
+            .or_else(|| additive.then_some(baseline.primary).flatten())
+            .or_else(|| ids.last().copied());
+        SelectionState { ids, primary }
+    }
+
+    fn normalize_selection_order(&mut self) {
+        let primary = self
+            .selection
+            .primary
+            .filter(|id| self.selection.contains(*id));
+        self.selection.ids = self
+            .state
+            .elements
+            .iter()
+            .filter(|element| self.selection.contains(element.id))
+            .map(|element| element.id)
+            .collect();
+        self.selection.primary = primary.or_else(|| self.selection.ids.last().copied());
     }
 
     pub fn selected_ocr_text(&self) -> Option<&str> {
@@ -578,7 +699,7 @@ impl AnnotationDocument {
             block.id = ElementId(OCR_ID_BASE.saturating_add(index as u64));
         }
         self.state.ocr_blocks = blocks;
-        self.selected = None;
+        self.selection.clear();
         self.selected_ocr = None;
         self.record_state_change(baseline);
     }
@@ -597,7 +718,8 @@ impl AnnotationDocument {
     }
 
     pub fn selected_serial_number(&self) -> Option<u32> {
-        self.selected
+        self.selection
+            .single_id()
             .and_then(|id| self.element(id))
             .and_then(|element| match &element.kind {
                 ElementKind::SerialNumber { number, .. } => Some(*number),
@@ -607,7 +729,7 @@ impl AnnotationDocument {
 
     pub fn update_serial_number(&mut self, number: u32) -> bool {
         let number = number.max(1);
-        if let Some(id) = self.selected {
+        if let Some(id) = self.selection.single_id() {
             let baseline = self.state.clone();
             let Some(element) = self
                 .state
@@ -699,7 +821,7 @@ impl AnnotationDocument {
                 if let Some(id) = self.hit_element(point) {
                     let baseline = self.state.clone();
                     self.state.elements.retain(|element| element.id != id);
-                    self.selected = None;
+                    self.selection.clear();
                     self.record_state_change(baseline);
                 }
             }
@@ -729,12 +851,12 @@ impl AnnotationDocument {
                         number: self.state.next_serial_number,
                     },
                     AnnotationTool::Text => ElementKind::Text {
-                        bounds: Rect {
-                            left: point.x,
-                            top: point.y,
-                            right: (point.x + 220.0).min(self.width as f32),
-                            bottom: (point.y + style.font_size * 1.8).min(self.height as f32),
-                        },
+                        bounds: default_text_bounds(
+                            point,
+                            self.width,
+                            self.height,
+                            style.font_size,
+                        ),
                         content: "文本".to_string(),
                     },
                     AnnotationTool::Mosaic | AnnotationTool::Blur => ElementKind::EffectPath {
@@ -746,10 +868,11 @@ impl AnnotationDocument {
                 self.active = Some(ActiveOperation::Draw {
                     baseline: self.state.clone(),
                     element: AnnotationElement { id, kind, style },
+                    anchor: point,
                 });
                 self.active_base_pixels =
                     (!self.state.ocr_style.above_annotations).then(|| self.content_pixels.clone());
-                self.selected = None;
+                self.selection.clear();
                 self.selected_ocr = None;
                 self.refresh_interaction();
             }
@@ -762,8 +885,57 @@ impl AnnotationDocument {
 
     pub fn update_with_modifiers(&mut self, point: Point, preserve_aspect: bool, centered: bool) {
         let point = self.clamp_point(point);
+        if let Some(ActiveOperation::Marquee {
+            start,
+            baseline_selection,
+            additive,
+            ..
+        }) = self.active.as_ref()
+        {
+            let start = *start;
+            let baseline_selection = baseline_selection.clone();
+            let additive = *additive;
+            if let Some(ActiveOperation::Marquee { current, .. }) = self.active.as_mut() {
+                *current = point;
+            }
+            self.selection = self.selection_for_marquee(
+                Rect::from_points(start, point),
+                &baseline_selection,
+                additive,
+            );
+            self.selected_ocr = None;
+            self.refresh_preview();
+            return;
+        }
+        if let Some(ActiveOperation::GroupMove {
+            originals,
+            start_pointer,
+            start_bounds,
+            ..
+        }) = self.active.as_ref()
+        {
+            let originals = originals.clone();
+            let start_pointer = *start_pointer;
+            let start_bounds = *start_bounds;
+            let requested = Point::new(point.x - start_pointer.x, point.y - start_pointer.y);
+            let delta = clamped_group_translation(start_bounds, requested, self.width, self.height);
+            for original in originals {
+                if let Some(element) = self
+                    .state
+                    .elements
+                    .iter_mut()
+                    .find(|element| element.id == original.id)
+                {
+                    *element = translate_element(&original, delta);
+                }
+            }
+            self.refresh_interaction();
+            return;
+        }
         match self.active.as_mut() {
-            Some(ActiveOperation::Draw { element, .. }) => match &mut element.kind {
+            Some(ActiveOperation::Draw {
+                element, anchor, ..
+            }) => match &mut element.kind {
                 ElementKind::Freehand { points, .. } | ElementKind::EffectPath { points, .. } => {
                     if points.last().copied() != Some(point) {
                         points.push(point);
@@ -781,8 +953,9 @@ impl AnnotationDocument {
                 }
                 ElementKind::SerialNumber { center, .. } => *center = point,
                 ElementKind::Text { bounds, .. } => {
-                    bounds.right = point.x.max(bounds.left + MIN_ELEMENT_SIZE);
-                    bounds.bottom = point.y.max(bounds.top + MIN_ELEMENT_SIZE);
+                    if point.distance(*anchor) > TEXT_DRAG_THRESHOLD {
+                        *bounds = dragged_text_bounds(*anchor, point, self.width, self.height);
+                    }
                 }
             },
             Some(ActiveOperation::Transform {
@@ -862,6 +1035,7 @@ impl AnnotationDocument {
                     }
                 }
             }
+            Some(ActiveOperation::GroupMove { .. }) | Some(ActiveOperation::Marquee { .. }) => {}
             None => {}
         }
         self.refresh_interaction();
@@ -883,7 +1057,9 @@ impl AnnotationDocument {
         };
         self.active_base_pixels = None;
         match active {
-            ActiveOperation::Draw { baseline, element } => {
+            ActiveOperation::Draw {
+                baseline, element, ..
+            } => {
                 if !element_has_content(&element) {
                     self.state = baseline;
                     self.refresh();
@@ -892,7 +1068,7 @@ impl AnnotationDocument {
                 if matches!(element.kind, ElementKind::SerialNumber { .. }) {
                     self.state.next_serial_number = self.state.next_serial_number.saturating_add(1);
                 }
-                self.selected = Some(element.id);
+                self.selection = SelectionState::single(element.id);
                 self.state.elements.push(element);
                 self.record_state_change(baseline);
             }
@@ -912,6 +1088,17 @@ impl AnnotationDocument {
                 }
                 self.record_state_change(baseline);
             }
+            ActiveOperation::GroupMove { baseline, .. } => {
+                if self.state == baseline {
+                    self.refresh();
+                    return false;
+                }
+                self.record_state_change(baseline);
+            }
+            ActiveOperation::Marquee { .. } => {
+                self.refresh_preview();
+                return !self.selection.ids.is_empty();
+            }
         }
         true
     }
@@ -919,11 +1106,20 @@ impl AnnotationDocument {
     pub fn cancel_active(&mut self) {
         if let Some(active) = self.active.take() {
             self.active_base_pixels = None;
-            self.state = match active {
+            match active {
                 ActiveOperation::Draw { baseline, .. }
-                | ActiveOperation::Transform { baseline, .. } => baseline,
-            };
-            self.refresh();
+                | ActiveOperation::Transform { baseline, .. }
+                | ActiveOperation::GroupMove { baseline, .. } => {
+                    self.state = baseline;
+                    self.refresh();
+                }
+                ActiveOperation::Marquee {
+                    baseline_selection, ..
+                } => {
+                    self.selection = baseline_selection;
+                    self.refresh_preview();
+                }
+            }
         }
     }
 
@@ -933,7 +1129,7 @@ impl AnnotationDocument {
             return false;
         };
         self.redo.push(std::mem::replace(&mut self.state, previous));
-        self.selected = None;
+        self.selection.clear();
         self.selected_ocr = None;
         self.refresh();
         true
@@ -946,7 +1142,7 @@ impl AnnotationDocument {
         };
         let current = std::mem::replace(&mut self.state, next);
         self.push_undo(current);
-        self.selected = None;
+        self.selection.clear();
         self.selected_ocr = None;
         self.refresh();
         true
@@ -973,24 +1169,61 @@ impl AnnotationDocument {
 
     pub fn select_at(&mut self, point: Point) -> bool {
         let point = self.clamp_point(point);
-        self.selected = self.hit_element(point);
-        self.selected_ocr = if self.selected.is_none() {
+        self.selection = self
+            .hit_element(point)
+            .map(SelectionState::single)
+            .unwrap_or_default();
+        self.selected_ocr = if self.selection.ids.is_empty() {
             self.hit_ocr(point)
         } else {
             None
         };
         self.refresh_preview();
-        self.selected.is_some() || self.selected_ocr.is_some()
+        !self.selection.ids.is_empty() || self.selected_ocr.is_some()
+    }
+
+    pub fn begin_marquee_selection(&mut self, point: Point, additive: bool) {
+        self.cancel_active();
+        let point = self.clamp_point(point);
+        let baseline_selection = self.selection.clone();
+        if !additive {
+            self.selection.clear();
+        }
+        self.selected_ocr = None;
+        self.active = Some(ActiveOperation::Marquee {
+            start: point,
+            current: point,
+            baseline_selection,
+            additive,
+        });
+        self.refresh_preview();
+    }
+
+    pub fn marquee_bounds(&self) -> Option<Rect> {
+        match self.active.as_ref() {
+            Some(ActiveOperation::Marquee { start, current, .. }) => {
+                Some(Rect::from_points(*start, *current))
+            }
+            _ => None,
+        }
     }
 
     pub fn clear_selection(&mut self) {
-        self.selected = None;
+        self.selection.clear();
         self.selected_ocr = None;
         self.refresh_preview();
     }
 
     pub fn selection_handle_at(&self, point: Point) -> SelectionHandle {
-        self.selected
+        if self.selection.ids.len() > 1 {
+            return self
+                .hit_element(point)
+                .filter(|id| self.selection.contains(*id))
+                .map(|_| SelectionHandle::Move)
+                .unwrap_or(SelectionHandle::None);
+        }
+        self.selection
+            .single_id()
             .and_then(|id| self.element(id))
             .map(|element| selection_handle_for_element(element, point))
             .unwrap_or(SelectionHandle::None)
@@ -998,47 +1231,94 @@ impl AnnotationDocument {
 
     pub fn has_interactive_target_at(&self, point: Point) -> bool {
         let point = self.clamp_point(point);
-        self.selected
-            .and_then(|id| self.element(id))
-            .is_some_and(|element| {
-                selection_handle_for_element(element, point) != SelectionHandle::None
-            })
+        self.selection_handle_at(point) != SelectionHandle::None
             || self.hit_element(point).is_some()
             || self.hit_ocr(point).is_some()
     }
 
     pub fn delete_selected(&mut self) -> bool {
-        if let Some(id) = self.selected.take() {
-            let baseline = self.state.clone();
-            self.state.elements.retain(|element| element.id != id);
-            self.record_state_change(baseline);
-            return true;
+        if self.selection.ids.is_empty() {
+            return false;
         }
-        false
+        let baseline = self.state.clone();
+        self.state
+            .elements
+            .retain(|element| !self.selection.contains(element.id));
+        if self.state == baseline {
+            return false;
+        }
+        self.selection.clear();
+        self.record_state_change(baseline);
+        true
     }
 
     pub fn apply_layer_command(&mut self, command: LayerCommand) -> bool {
-        if let Some(id) = self.selected {
-            let Some(index) = self
-                .state
-                .elements
-                .iter()
-                .position(|element| element.id == id)
-            else {
-                return false;
-            };
-            let destination = match command {
-                LayerCommand::Forward => (index + 1).min(self.state.elements.len() - 1),
-                LayerCommand::Backward => index.saturating_sub(1),
-                LayerCommand::Front => self.state.elements.len() - 1,
-                LayerCommand::Back => 0,
-            };
-            if destination == index {
+        if !self.selection.ids.is_empty() {
+            let baseline = self.state.clone();
+            match command {
+                LayerCommand::Forward => {
+                    for index in (0..self.state.elements.len().saturating_sub(1)).rev() {
+                        let current_selected =
+                            self.selection.contains(self.state.elements[index].id);
+                        let next_selected =
+                            self.selection.contains(self.state.elements[index + 1].id);
+                        if current_selected && !next_selected {
+                            self.state.elements.swap(index, index + 1);
+                        }
+                    }
+                }
+                LayerCommand::Backward => {
+                    for index in 1..self.state.elements.len() {
+                        let current_selected =
+                            self.selection.contains(self.state.elements[index].id);
+                        let previous_selected =
+                            self.selection.contains(self.state.elements[index - 1].id);
+                        if current_selected && !previous_selected {
+                            self.state.elements.swap(index - 1, index);
+                        }
+                    }
+                }
+                LayerCommand::Front => {
+                    let mut reordered = Vec::with_capacity(self.state.elements.len());
+                    reordered.extend(
+                        self.state
+                            .elements
+                            .iter()
+                            .filter(|element| !self.selection.contains(element.id))
+                            .cloned(),
+                    );
+                    reordered.extend(
+                        self.state
+                            .elements
+                            .iter()
+                            .filter(|element| self.selection.contains(element.id))
+                            .cloned(),
+                    );
+                    self.state.elements = reordered;
+                }
+                LayerCommand::Back => {
+                    let mut reordered = Vec::with_capacity(self.state.elements.len());
+                    reordered.extend(
+                        self.state
+                            .elements
+                            .iter()
+                            .filter(|element| self.selection.contains(element.id))
+                            .cloned(),
+                    );
+                    reordered.extend(
+                        self.state
+                            .elements
+                            .iter()
+                            .filter(|element| !self.selection.contains(element.id))
+                            .cloned(),
+                    );
+                    self.state.elements = reordered;
+                }
+            }
+            if self.state == baseline {
                 return false;
             }
-            let baseline = self.state.clone();
-            let element = self.state.elements.remove(index);
-            self.state.elements.insert(destination, element);
+            self.normalize_selection_order();
             self.record_state_change(baseline);
             return true;
         }
@@ -1056,19 +1336,15 @@ impl AnnotationDocument {
     }
 
     pub fn update_selected_style(&mut self, patch: &StylePatch) -> bool {
-        let Some(id) = self.selected else {
+        if self.selection.ids.is_empty() {
             return false;
-        };
+        }
         let baseline = self.state.clone();
-        let Some(element) = self
-            .state
-            .elements
-            .iter_mut()
-            .find(|element| element.id == id)
-        else {
-            return false;
-        };
-        apply_style_patch(&mut element.style, patch);
+        for element in &mut self.state.elements {
+            if self.selection.contains(element.id) {
+                apply_style_patch(&mut element.style, patch);
+            }
+        }
         if self.state == baseline {
             return false;
         }
@@ -1077,7 +1353,7 @@ impl AnnotationDocument {
     }
 
     pub fn update_selected_text(&mut self, text: String) -> bool {
-        let Some(id) = self.selected else {
+        let Some(id) = self.selection.single_id() else {
             return false;
         };
         let baseline = self.state.clone();
@@ -1101,13 +1377,15 @@ impl AnnotationDocument {
     }
 
     pub fn selected_style(&self) -> Option<&ElementStyle> {
-        self.selected
+        self.selection
+            .primary
             .and_then(|id| self.element(id))
             .map(|element| &element.style)
     }
 
     pub fn selected_tool(&self) -> Option<AnnotationTool> {
-        self.selected
+        self.selection
+            .primary
             .and_then(|id| self.element(id))
             .map(|element| match &element.kind {
                 ElementKind::Freehand { highlighter, .. } => {
@@ -1138,44 +1416,63 @@ impl AnnotationDocument {
     }
 
     pub fn selected_text(&self) -> Option<&str> {
-        self.selected
+        self.selection
+            .single_id()
             .and_then(|id| self.element(id))
             .and_then(|element| match &element.kind {
                 ElementKind::Text { content, .. } => Some(content.as_str()),
                 _ => None,
             })
     }
-
     fn begin_selection_interaction(
         &mut self,
         point: Point,
         _preserve_aspect: bool,
         _centered: bool,
     ) {
-        let current_handle = self
-            .selected
+        let hit = self.hit_element(point);
+        if self.selection.ids.len() > 1
+            && hit.is_some_and(|id| self.selection.contains(id))
+            && let Some(start_bounds) = self.selection_bounds()
+        {
+            let originals = self
+                .state
+                .elements
+                .iter()
+                .filter(|element| self.selection.contains(element.id))
+                .cloned()
+                .collect();
+            self.selected_ocr = None;
+            self.active = Some(ActiveOperation::GroupMove {
+                baseline: self.state.clone(),
+                originals,
+                start_pointer: point,
+                start_bounds,
+            });
+            self.active_base_pixels = None;
+            self.refresh_interaction();
+            return;
+        }
+
+        let selected_id = self.selection.single_id();
+        let current_handle = selected_id
             .and_then(|id| self.element(id))
             .map(|element| selection_handle_for_element(element, point))
             .unwrap_or(SelectionHandle::None);
         let (id, handle) = if current_handle != SelectionHandle::None {
-            (self.selected, current_handle)
+            (selected_id, current_handle)
         } else {
-            let id = self.hit_element(point);
             (
-                id,
-                if id.is_some() {
+                hit,
+                if hit.is_some() {
                     SelectionHandle::Move
                 } else {
                     SelectionHandle::None
                 },
             )
         };
-        self.selected = id;
-        self.selected_ocr = if id.is_none() {
-            self.hit_ocr(point)
-        } else {
-            None
-        };
+        self.selection = id.map(SelectionState::single).unwrap_or_default();
+        self.selected_ocr = id.is_none().then(|| self.hit_ocr(point)).flatten();
         let Some(id) = id else {
             self.refresh_preview();
             return;
@@ -1263,6 +1560,7 @@ impl AnnotationDocument {
         let element = match self.active.as_ref() {
             Some(ActiveOperation::Draw { element, .. }) => Some(element),
             Some(ActiveOperation::Transform { original, .. }) => self.element(original.id),
+            Some(ActiveOperation::GroupMove { .. }) | Some(ActiveOperation::Marquee { .. }) => None,
             None => None,
         };
         if let Some(element) = element.cloned() {
@@ -1277,27 +1575,53 @@ impl AnnotationDocument {
     }
 
     fn draw_selection_preview(&mut self) {
-        let selected = self
-            .selected
-            .and_then(|id| self.element(id))
-            .map(|element| {
-                let (frame, rotation) = element.selection_frame();
-                (
+        if self.selection.ids.len() > 1 {
+            if let Some(bounds) = self.selection_bounds() {
+                draw_selection(
+                    &mut self.preview_pixels,
+                    self.width,
+                    self.height,
+                    bounds,
+                    0.0,
+                    false,
+                    false,
+                );
+            }
+        } else {
+            let selected = self
+                .selection
+                .single_id()
+                .and_then(|id| self.element(id))
+                .map(|element| {
+                    let (frame, rotation) = element.selection_frame();
+                    (
+                        frame,
+                        rotation,
+                        element.supports_resize(),
+                        element.supports_rotation(),
+                    )
+                });
+            if let Some((frame, rotation, show_handles, show_rotation)) = selected {
+                draw_selection(
+                    &mut self.preview_pixels,
+                    self.width,
+                    self.height,
                     frame,
                     rotation,
-                    element.supports_resize(),
-                    element.supports_rotation(),
-                )
-            });
-        if let Some((frame, rotation, true, show_rotation)) = selected {
+                    show_handles,
+                    show_rotation,
+                );
+            }
+        }
+        if let Some(bounds) = self.marquee_bounds() {
             draw_selection(
                 &mut self.preview_pixels,
                 self.width,
                 self.height,
-                frame,
-                rotation,
-                true,
-                show_rotation,
+                bounds,
+                0.0,
+                false,
+                false,
             );
         }
         let selected_ocr_points = self
@@ -1320,6 +1644,7 @@ impl AnnotationDocument {
         match self.active.as_ref() {
             Some(ActiveOperation::Draw { element, .. }) => Some(element),
             Some(ActiveOperation::Transform { original, .. }) => self.element(original.id),
+            Some(ActiveOperation::GroupMove { .. }) | Some(ActiveOperation::Marquee { .. }) => None,
             None => None,
         }
     }
@@ -1545,6 +1870,66 @@ fn square_endpoint(start: Point, pointer: Point, canvas_width: u32, canvas_heigh
     Point::new(start.x + direction_x * size, start.y + direction_y * size)
 }
 
+fn default_text_bounds(
+    anchor: Point,
+    canvas_width: u32,
+    canvas_height: u32,
+    font_size: f32,
+) -> Rect {
+    let canvas_width = canvas_width as f32;
+    let canvas_height = canvas_height as f32;
+    let width = DEFAULT_TEXT_WIDTH.min(canvas_width).max(1.0);
+    let height = DEFAULT_TEXT_HEIGHT
+        .max(font_size * 2.4)
+        .min(canvas_height)
+        .max(1.0);
+    let left = anchor.x.min((canvas_width - width).max(0.0));
+    let top = anchor.y.min((canvas_height - height).max(0.0));
+    Rect {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+fn dragged_text_bounds(
+    anchor: Point,
+    pointer: Point,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Rect {
+    fn axis_bounds(anchor: f32, pointer: f32, minimum: f32, canvas_extent: f32) -> (f32, f32) {
+        let extent = (pointer - anchor)
+            .abs()
+            .max(minimum.min(canvas_extent))
+            .min(canvas_extent);
+        let (mut start, mut end) = if pointer < anchor {
+            (anchor - extent, anchor)
+        } else {
+            (anchor, anchor + extent)
+        };
+        if start < 0.0 {
+            end -= start;
+            start = 0.0;
+        }
+        if end > canvas_extent {
+            start -= end - canvas_extent;
+            end = canvas_extent;
+        }
+        (start.max(0.0), end.min(canvas_extent))
+    }
+
+    let (left, right) = axis_bounds(anchor.x, pointer.x, MIN_TEXT_WIDTH, canvas_width as f32);
+    let (top, bottom) = axis_bounds(anchor.y, pointer.y, MIN_TEXT_HEIGHT, canvas_height as f32);
+    Rect {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transform_rect(
     bounds: Rect,
@@ -1700,6 +2085,35 @@ fn project_size_to_aspect(raw_width: f32, raw_height: f32, aspect: f32) -> (f32,
     (projected_height * aspect, projected_height)
 }
 
+fn rect_contains_rect(container: Rect, candidate: Rect) -> bool {
+    candidate.left >= container.left
+        && candidate.top >= container.top
+        && candidate.right <= container.right
+        && candidate.bottom <= container.bottom
+}
+
+fn clamped_group_translation(
+    bounds: Rect,
+    requested: Point,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Point {
+    let max_x = canvas_width.saturating_sub(1) as f32;
+    let max_y = canvas_height.saturating_sub(1) as f32;
+    Point::new(
+        clamp_translation_axis(requested.x, -bounds.left, max_x - bounds.right),
+        clamp_translation_axis(requested.y, -bounds.top, max_y - bounds.bottom),
+    )
+}
+
+fn clamp_translation_axis(requested: f32, minimum: f32, maximum: f32) -> f32 {
+    if minimum <= maximum {
+        requested.clamp(minimum, maximum)
+    } else {
+        0.0
+    }
+}
+
 /// Resize or move a rotated shape by working in its local (unrotated) frame.
 /// Returns the new start/end corners, or `None` when the element is not a
 /// rotated shape and the axis-aligned path should be used instead.
@@ -1796,6 +2210,30 @@ fn transform_element(element: &AnnotationElement, from: Rect, to: Rect) -> Annot
         ElementKind::Text { bounds, .. } => *bounds = to,
     }
     transformed
+}
+
+fn translate_element(element: &AnnotationElement, delta: Point) -> AnnotationElement {
+    let translate = |point: Point| Point::new(point.x + delta.x, point.y + delta.y);
+    let mut translated = element.clone();
+    match &mut translated.kind {
+        ElementKind::Freehand { points, .. } | ElementKind::EffectPath { points, .. } => {
+            for point in points {
+                *point = translate(*point);
+            }
+        }
+        ElementKind::Line { start, end, .. } | ElementKind::Shape { start, end, .. } => {
+            *start = translate(*start);
+            *end = translate(*end);
+        }
+        ElementKind::SerialNumber { center, .. } => *center = translate(*center),
+        ElementKind::Text { bounds, .. } => {
+            bounds.left += delta.x;
+            bounds.right += delta.x;
+            bounds.top += delta.y;
+            bounds.bottom += delta.y;
+        }
+    }
+    translated
 }
 
 fn render_element(pixels: &mut [u8], width: u32, height: u32, element: &AnnotationElement) {
@@ -2239,6 +2677,100 @@ fn draw_shape(
     fill_polygon(pixels, width, height, &outline, fill);
     draw_polygon_outline(pixels, width, height, &outline, stroke, stroke_width);
 }
+
+const SERIAL_FONT_SIZES: [f32; 4] = [16.0, 20.0, 28.0, 36.0];
+
+fn serial_font_size(requested: f32) -> f32 {
+    SERIAL_FONT_SIZES
+        .into_iter()
+        .min_by(|left, right| {
+            (requested - *left)
+                .abs()
+                .total_cmp(&(requested - *right).abs())
+        })
+        .unwrap_or(16.0)
+}
+
+fn serial_radius(style: &ElementStyle) -> f32 {
+    serial_font_size(style.font_size)
+}
+
+fn tight_text_image(
+    font: &FontArc,
+    content: &str,
+    font_size: f32,
+    color: RgbaColor,
+) -> Option<RgbaImage> {
+    let (layout_width, layout_height) = text_size(font_size, font, content);
+    let padding = (font_size.ceil() as u32).saturating_mul(2).max(12);
+    let mut image = RgbaImage::new(
+        layout_width
+            .saturating_add(padding.saturating_mul(2))
+            .max(1),
+        layout_height
+            .saturating_add(padding.saturating_mul(2))
+            .max(1),
+    );
+    draw_text_mut(
+        &mut image,
+        Rgba([color.red, color.green, color.blue, color.alpha]),
+        padding as i32,
+        padding as i32,
+        font_size,
+        font,
+        content,
+    );
+
+    let mut left = image.width();
+    let mut top = image.height();
+    let mut right = 0;
+    let mut bottom = 0;
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x.saturating_add(1));
+        bottom = bottom.max(y.saturating_add(1));
+    }
+    (left < right && top < bottom).then(|| {
+        image::imageops::crop_imm(&image, left, top, right - left, bottom - top).to_image()
+    })
+}
+
+fn fitted_serial_text(
+    font: &FontArc,
+    content: &str,
+    requested_size: f32,
+    max_extent: f32,
+    color: RgbaColor,
+) -> Option<RgbaImage> {
+    let mut size = requested_size;
+    for _ in 0..4 {
+        let image = tight_text_image(font, content, size, color)?;
+        let largest = image.width().max(image.height()) as f32;
+        if largest <= max_extent || size <= 8.0 {
+            return Some(image);
+        }
+        size *= (max_extent / largest).clamp(0.35, 0.98);
+    }
+    tight_text_image(font, content, size, color)
+}
+
+fn alpha_centroid(image: &RgbaImage) -> Option<(f32, f32)> {
+    let mut weight = 0.0_f32;
+    let mut weighted_x = 0.0_f32;
+    let mut weighted_y = 0.0_f32;
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let alpha = pixel[3] as f32 / 255.0;
+        weight += alpha;
+        weighted_x += (x as f32 + 0.5) * alpha;
+        weighted_y += (y as f32 + 0.5) * alpha;
+    }
+    (weight > f32::EPSILON).then_some((weighted_x / weight, weighted_y / weight))
+}
+
 fn draw_serial_number(
     pixels: &mut [u8],
     width: u32,
@@ -2247,8 +2779,16 @@ fn draw_serial_number(
     number: u32,
     style: &ElementStyle,
 ) {
-    let radius = (style.font_size * 0.9).clamp(13.0, 36.0);
-    draw_disc(pixels, width, height, center, radius, style.fill);
+    let font_size = serial_font_size(style.font_size);
+    let radius = font_size;
+    draw_disc(
+        pixels,
+        width,
+        height,
+        center,
+        radius,
+        style.fill.with_alpha_factor(style.opacity),
+    );
     draw_ellipse_outline(
         pixels,
         width,
@@ -2259,28 +2799,28 @@ fn draw_serial_number(
             right: center.x + radius,
             bottom: center.y + radius,
         },
-        style.stroke,
+        style.stroke.with_alpha_factor(style.opacity),
         style.stroke_width,
     );
-    let bounds = Rect {
-        left: center.x - radius,
-        top: center.y - radius,
-        right: center.x + radius,
-        bottom: center.y + radius,
+    let Some(font) = system_font(style.bold) else {
+        return;
     };
-    draw_text_element(
-        pixels,
-        width,
-        height,
-        bounds,
-        number.to_string().as_str(),
-        &ElementStyle {
-            fill: RgbaColor::TRANSPARENT,
-            alignment: TextAlignment::Center,
-            ..style.clone()
-        },
-        style.text,
-    );
+    let color = style.text.with_alpha_factor(style.opacity);
+    let max_extent = radius * 2.0 - (style.stroke_width * 2.0 + 4.0).clamp(4.0, radius);
+    let Some(text) = fitted_serial_text(
+        font,
+        number.clamp(1, 999).to_string().as_str(),
+        font_size,
+        max_extent.max(radius),
+        color,
+    ) else {
+        return;
+    };
+    let (ink_x, ink_y) =
+        alpha_centroid(&text).unwrap_or((text.width() as f32 / 2.0, text.height() as f32 / 2.0));
+    let origin_x = (center.x - ink_x).round() as i32;
+    let origin_y = (center.y - ink_y).round() as i32;
+    composite_rgba(pixels, width, height, &text, origin_x, origin_y);
 }
 
 fn expected_pixel_len(width: u32, height: u32) -> Option<usize> {
@@ -2884,6 +3424,94 @@ mod tests {
     }
 
     #[test]
+    fn marquee_selects_only_fully_contained_elements_and_shift_adds() {
+        let mut document = document();
+        for (start, end) in [
+            (Point::new(20.0, 20.0), Point::new(60.0, 60.0)),
+            (Point::new(90.0, 20.0), Point::new(140.0, 70.0)),
+        ] {
+            document.begin(AnnotationTool::Rectangle, start, RgbaColor::RED, 4.0);
+            assert!(document.commit(end));
+        }
+        let ids = [document.elements()[0].id, document.elements()[1].id];
+
+        document.begin_marquee_selection(Point::new(10.0, 10.0), false);
+        document.update(Point::new(70.0, 70.0));
+        assert!(document.commit(Point::new(70.0, 70.0)));
+        assert_eq!(document.selected_ids(), &[ids[0]]);
+
+        document.begin_marquee_selection(Point::new(75.0, 10.0), true);
+        document.update(Point::new(150.0, 80.0));
+        assert!(document.commit(Point::new(150.0, 80.0)));
+        assert_eq!(document.selected_ids(), &ids);
+
+        document.begin_marquee_selection(Point::new(200.0, 100.0), true);
+        document.update(Point::new(250.0, 150.0));
+        document.cancel_active();
+        assert_eq!(document.selected_ids(), &ids);
+
+        document.begin_marquee_selection(Point::new(10.0, 10.0), false);
+        document.update(Point::new(50.0, 50.0));
+        assert!(!document.commit(Point::new(50.0, 50.0)));
+        assert_eq!(document.selection_count(), 0);
+    }
+
+    #[test]
+    fn multi_selection_moves_styles_and_undoes_as_one_history_entry() {
+        let mut document = document();
+        for (start, end) in [
+            (Point::new(20.0, 20.0), Point::new(60.0, 60.0)),
+            (Point::new(90.0, 20.0), Point::new(140.0, 70.0)),
+        ] {
+            document.begin(AnnotationTool::Rectangle, start, RgbaColor::RED, 4.0);
+            assert!(document.commit(end));
+        }
+        document.begin_marquee_selection(Point::new(10.0, 10.0), false);
+        document.update(Point::new(150.0, 80.0));
+        assert!(document.commit(Point::new(150.0, 80.0)));
+        let original_bounds = [
+            document.elements()[0].bounds(),
+            document.elements()[1].bounds(),
+        ];
+
+        document.begin_with_style(
+            AnnotationTool::Select,
+            Point::new(40.0, 40.0),
+            ElementStyle::default(),
+            false,
+            false,
+        );
+        assert!(document.commit(Point::new(55.0, 50.0)));
+        assert_eq!(document.selection_count(), 2);
+        assert!(document.elements()[0].bounds().left > original_bounds[0].left);
+        assert!(document.elements()[1].bounds().left > original_bounds[1].left);
+        assert!(document.undo());
+        assert_eq!(document.elements()[0].bounds(), original_bounds[0]);
+        assert_eq!(document.elements()[1].bounds(), original_bounds[1]);
+
+        document.begin_marquee_selection(Point::new(10.0, 10.0), false);
+        document.update(Point::new(150.0, 80.0));
+        assert!(document.commit(Point::new(150.0, 80.0)));
+        assert!(document.update_selected_style(&StylePatch {
+            stroke_width: Some(12.0),
+            opacity: Some(0.4),
+            ..StylePatch::default()
+        }));
+        assert!(
+            document.elements().iter().all(|element| {
+                element.style.stroke_width == 12.0 && element.style.opacity == 0.4
+            })
+        );
+        assert!(document.undo());
+        assert!(
+            document
+                .elements()
+                .iter()
+                .all(|element| element.style.stroke_width == 4.0)
+        );
+    }
+
+    #[test]
     fn style_and_layer_changes_are_history_entries() {
         let mut document = document();
         for offset in [10.0, 40.0] {
@@ -3417,6 +4045,94 @@ mod tests {
             document.elements()[0].bounds().center(),
             Point::new(40.0, 40.0)
         );
+    }
+
+    #[test]
+    fn serial_number_ink_is_centered_and_fits_all_original_sizes() {
+        let center = Point::new(160.0, 100.0);
+        for font_size in SERIAL_FONT_SIZES {
+            for number in [1, 8, 42, 999] {
+                let mut document =
+                    AnnotationDocument::new(320, 200, vec![255; 320 * 200 * 4]).unwrap();
+                document.configure_next_serial_number(number);
+                document.begin_with_style(
+                    AnnotationTool::SerialNumber,
+                    center,
+                    ElementStyle {
+                        fill: RgbaColor::RED,
+                        stroke: RgbaColor::TRANSPARENT,
+                        text: RgbaColor::BLACK,
+                        stroke_width: 1.0,
+                        font_size,
+                        ..ElementStyle::default()
+                    },
+                    false,
+                    false,
+                );
+                assert!(document.commit(center));
+                document.clear_selection();
+
+                let bounds = document.elements()[0].bounds();
+                assert!((bounds.width() - font_size * 2.0).abs() < 0.001);
+                assert!((bounds.height() - font_size * 2.0).abs() < 0.001);
+
+                let mut count = 0_u32;
+                let mut sum_x = 0.0_f32;
+                let mut sum_y = 0.0_f32;
+                for y in bounds.top.floor().max(0.0) as u32
+                    ..bounds.bottom.ceil().min(document.height() as f32) as u32
+                {
+                    for x in bounds.left.floor().max(0.0) as u32
+                        ..bounds.right.ceil().min(document.width() as f32) as u32
+                    {
+                        let index = pixel_index(document.width(), x, y);
+                        let pixel = &document.pixels()[index..index + 4];
+                        if pixel[0] < 96 && pixel[1] < 96 && pixel[2] < 96 {
+                            count += 1;
+                            sum_x += x as f32 + 0.5;
+                            sum_y += y as f32 + 0.5;
+                            let dx = x as f32 + 0.5 - center.x;
+                            let dy = y as f32 + 0.5 - center.y;
+                            assert!(
+                                dx * dx + dy * dy <= font_size * font_size,
+                                "{number} at {font_size}px escaped the circle"
+                            );
+                        }
+                    }
+                }
+                assert!(count > 0, "missing ink for {number} at {font_size}px");
+                let ink_center = Point::new(sum_x / count as f32, sum_y / count as f32);
+                assert!(
+                    (ink_center.x - center.x).abs() <= 1.5,
+                    "{number} at {font_size}px was horizontally off-center: {ink_center:?}"
+                );
+                assert!(
+                    (ink_center.y - center.y).abs() <= 1.5,
+                    "{number} at {font_size}px was vertically off-center: {ink_center:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_click_keeps_a_large_default_box_and_drag_can_size_it() {
+        let mut document = AnnotationDocument::new(640, 360, vec![255; 640 * 360 * 4]).unwrap();
+        let anchor = Point::new(100.0, 80.0);
+        document.begin(AnnotationTool::Text, anchor, RgbaColor::BLACK, 1.0);
+        assert!(document.commit(anchor));
+        let ElementKind::Text { bounds, .. } = document.elements()[0].kind else {
+            panic!("expected text element");
+        };
+        assert!((bounds.width() - DEFAULT_TEXT_WIDTH).abs() < 0.001);
+        assert!(bounds.height() >= DEFAULT_TEXT_HEIGHT);
+
+        document.begin(AnnotationTool::Text, anchor, RgbaColor::BLACK, 1.0);
+        assert!(document.commit(Point::new(260.0, 150.0)));
+        let ElementKind::Text { bounds, .. } = document.elements()[1].kind else {
+            panic!("expected dragged text element");
+        };
+        assert!((bounds.width() - 160.0).abs() < 0.001);
+        assert!((bounds.height() - 70.0).abs() < 0.001);
     }
 
     #[test]
